@@ -75,7 +75,7 @@ export function createNuggetSystem(over?: Partial<NuggetCfg>): NuggetSystem {
         rot: rand(0, Math.PI * 2),
         rotV: rand(-0.25, 0.25),
         collecting: false,
-        flash: 0,
+        flash: 1,   // pop de escala/brillo al nacer (decae en step)
       })
     }
     // cap: auto-absorbe los más antiguos (su valor NO se pierde)
@@ -88,6 +88,7 @@ export function createNuggetSystem(over?: Partial<NuggetCfg>): NuggetSystem {
     let absorbed = 0
     const survivors: Nugget[] = []
     for (const n of list) {
+      if (n.flash > 0.02) n.flash *= 0.88
       // elegir atractor: ratón (imán) tiene prioridad, si no el bot
       let ax: number | null = null, ay = 0
       if (mouse) {
@@ -151,11 +152,12 @@ function drawNugget(ctx: CanvasRenderingContext2D, n: Nugget, r: number) {
   ctx.save()
   ctx.translate(n.x, n.y)
   ctx.rotate(n.rot)
+  if (n.flash > 0.02) ctx.scale(1 + n.flash * 0.9, 1 + n.flash * 0.9)
   if (n.collecting) { ctx.shadowColor = '#ffe066'; ctx.shadowBlur = 12 }
   // cuerpo
   ctx.beginPath()
   ctx.arc(0, 0, r, 0, Math.PI * 2)
-  ctx.fillStyle = n.collecting ? '#ffe680' : '#f5c518'
+  ctx.fillStyle = n.collecting ? '#ffe680' : n.flash > 0.3 ? '#fff3bf' : '#f5c518'
   ctx.fill()
   ctx.lineWidth = 1.5
   ctx.strokeStyle = '#b8860b'

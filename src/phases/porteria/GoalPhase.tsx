@@ -122,8 +122,10 @@ function resolveTarget(tx: number, ty: number, zones: Zone[]): Resolution {
  * ========================================================================== */
 
 type Vec = { x: number; y: number }
-type Flight = { active: boolean; start: number; fromX: number; fromY: number; toX: number; toY: number }
+type Flight = { active: boolean; start: number; fromX: number; fromY: number; toX: number; toY: number; trailColor: string }
+type Reject = { active: boolean; x: number; y: number; vx: number; vy: number; born: number }
 type Floater = { id: number; x: number; y: number; label: string; color: string }
+type Ripple = { id: number; x: number; y: number; color: string }
 
 /* ============================================================================
  * Componente
@@ -137,13 +139,22 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   const areaRef = useRef<HTMLDivElement>(null)
   const pointerRef = useRef<HTMLDivElement>(null)
   const ballRef = useRef<HTMLDivElement>(null)
+  const ballShadowRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const goldElRef = useRef<HTMLSpanElement>(null)
+  const netRef = useRef<HTMLDivElement>(null)
+  const porteroFigRef = useRef<HTMLDivElement>(null)
+  const footBallRef = useRef<HTMLDivElement>(null)
 
   const posRef = useRef<Vec>({ x: 50, y: 50 })
   const velRef = useRef<Vec>({ x: 0.8, y: -0.9 })
-  const flightRef = useRef<Flight>({ active: false, start: 0, fromX: 0, fromY: 0, toX: 0, toY: 0 })
+  const flightRef = useRef<Flight>({ active: false, start: 0, fromX: 0, fromY: 0, toX: 0, toY: 0, trailColor: '#ffffff' })
+  const rejectRef = useRef<Reject>({ active: false, x: 0, y: 0, vx: 0, vy: 0, born: 0 })
   const cooldownRef = useRef(false)
+  // estelas (solo lectura/escritura desde el rAF; jamás provocan render)
+  const ptrTrailRef = useRef<Vec[]>([])
+  const ballTrailRef = useRef<Vec[]>([])
+  const lastPtrColorRef = useRef('')
 
   // economía caliente: fuente de verdad en store.hot (mutación directa, sin commit)
   const goldDispRef = useRef(P.gold)    // valor mostrado (lerp → "tick")
@@ -159,6 +170,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   const levels = readLevels(P.levels)
   const levelsRef = useRef<Levels>(levels)
   levelsRef.current = levels // espejo siempre fresco para el bucle/resolución
+  const effZonesRef = useRef<Zone[]>(ZONES)
 
   const resolveRef = useRef<(tx: number, ty: number) => void>(() => {})
   const shootAtRef = useRef<(tx: number, ty: number, manual: boolean) => void>(() => {})
@@ -172,8 +184,15 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   const [cdKey, setCdKey] = useState(0)
   const [cdMs, setCdMs] = useState(COOLDOWN_MS)
   const [floaters, setFloaters] = useState<Floater[]>([])
+  const [ripples, setRipples] = useState<Ripple[]>([])
   const [victory, setVictory] = useState(false)
   const floaterId = useRef(0)
+
+  const pushRipple = (x: number, y: number, color: string) => {
+    const id = floaterId.current++
+    setRipples((rs) => [...rs, { id, x, y, color }])
+    window.setTimeout(() => setRipples((rs) => rs.filter((r) => r.id !== id)), 600)
+  }
 
   // Normaliza la velocidad inicial a SPEED una sola vez
   useEffect(() => {
@@ -195,6 +214,8 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
     const l = levelsRef.current
     const zones = ZONES.map((z) => scaleZone(z, zoneScale(l)))
     const res = resolveTarget(tx, ty, zones)
+    const ball = ballRef.current
+    const f = flightRef.current
 
     if (res.kind === 'gol') {
       P.goles++
@@ -202,8 +223,52 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
       const mult = res.zone === 'escuadra' ? escuadraMult(l) : res.zone === 'centro' ? 2 : 1
       const oroGol = Math.max(1, Math.round(oroBase(l) * mult * bonusGlobal(l)))
       spawnNuggets(tx, ty, oroGol)
+      // el balón entra: se lo traga la red + ripple + onda de la red
+      if (ball) ball.style.opacity = '0'
+      pushRipple(tx, ty, res.color)
+      netRef.current?.animate(
+        [{ transform: 'scale(1)' }, { transform: 'scale(1.012) skewX(0.5deg)' }, { transform: 'scale(1)' }],
+        { duration: 260, easing: 'ease-out' },
+      )
+      if (res.zone === 'escuadra') {
+        // momento premium: micro zoom-punch del área
+        areaRef.current?.animate(
+          [{ transform: 'scale(1)' }, { transform: 'scale(1.015)' }, { transform: 'scale(1)' }],
+          { duration: 160, easing: 'ease-out' },
+        )
+      }
     } else {
       P.fallos++
+      if (res.kind === 'parada') {
+        // ESTIRADA del portero hacia el punto del tiro (visual; el hitbox no se mueve)
+        const cx = PORTERO.x + PORTERO.w / 2
+        const cy = PORTERO.y + PORTERO.h / 2
+        const dir = tx < cx ? -1 : 1
+        const dy = ty < cy ? -16 : 6
+        porteroFigRef.current?.animate(
+          [
+            { transform: 'translate(0,0) rotate(0deg)' },
+            { transform: `translate(${dir * 30}px, ${dy}px) rotate(${dir * 16}deg)`, offset: 0.35 },
+            { transform: 'translate(0,0) rotate(0deg)' },
+          ],
+          { duration: 480, easing: 'ease-out' },
+        )
+        // rechace: el balón sale despedido lejos del portero
+        rejectRef.current = {
+          active: true, x: tx, y: ty,
+          vx: dir * rand(0.9, 1.6), vy: rand(-1.3, -0.7),
+          born: performance.now(),
+        }
+      } else {
+        // fuera: el balón sigue su trayectoria y se pierde
+        const dx = tx - f.fromX, dy2 = ty - f.fromY
+        const m = Math.hypot(dx, dy2) || 1
+        rejectRef.current = {
+          active: true, x: tx, y: ty,
+          vx: (dx / m) * 1.3, vy: (dy2 / m) * 1.3 - 0.3,
+          born: performance.now() - 250, // se desvanece antes (fade total 650ms)
+        }
+      }
       // shake imperativo (NO remonta el área/canvas/mira como haría un key change)
       areaRef.current?.animate(
         [
@@ -234,7 +299,20 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   // --- disparar a un objetivo concreto (manual = mira; auto = raso seguro) ---
   const shootAt = useCallback((tx: number, ty: number, manual: boolean) => {
     if (cooldownRef.current) return
-    flightRef.current = { active: true, start: 0, fromX: FOOT_X, fromY: FOOT_Y, toX: tx, toY: ty }
+    // la estela toma el color de la zona destino (dorada en escuadra, gris si va fuera/parada)
+    const zones = ZONES.map((z) => scaleZone(z, zoneScale(levelsRef.current)))
+    const res = resolveTarget(tx, ty, zones)
+    const trailColor = res.kind === 'gol' ? res.color : '#94a3b8'
+    flightRef.current = { active: true, start: 0, fromX: FOOT_X, fromY: FOOT_Y, toX: tx, toY: ty, trailColor }
+    // chut del balón estático del pie
+    footBallRef.current?.animate(
+      [
+        { transform: 'translateY(0) rotate(0deg)', opacity: 1 },
+        { transform: 'translateY(-9px) rotate(-30deg)', opacity: 0.4, offset: 0.4 },
+        { transform: 'translateY(0) rotate(0deg)', opacity: 1 },
+      ],
+      { duration: 240, easing: 'ease-out' },
+    )
     const cd = cooldownMs(levelsRef.current)
     cooldownRef.current = true
     setCooldown(true)
@@ -293,18 +371,66 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
         else if (p.y >= 100 - ry) { p.y = 100 - ry; bounce(v, 'y', -1) }
         ptr.style.transform = `translate(${(p.x / 100) * aw - POINTER_R}px, ${(p.y / 100) * ah - POINTER_R}px)`
 
+        /* ---- estela de la mira (se dibuja en el canvas más abajo) ---- */
+        const ptrTrail = ptrTrailRef.current
+        ptrTrail.push({ x: p.x, y: p.y })
+        if (ptrTrail.length > 14) ptrTrail.shift()
+
+        /* ---- la mira toma el color de lo que tiene debajo (escritura solo al cambiar) ---- */
+        {
+          const zs = effZonesRef.current
+          const under = resolveTarget(p.x, p.y, zs)
+          const c = cooldownRef.current ? '#ef4444' : under.kind === 'gol' ? under.color : under.kind === 'parada' ? PORTERO.color : '#ffffff'
+          if (c !== lastPtrColorRef.current) {
+            lastPtrColorRef.current = c
+            ptr.style.borderColor = c
+            ptr.style.color = c            // el punto central (::after) usa currentColor
+            ptr.style.boxShadow = `0 0 10px ${c}cc, inset 0 0 6px ${c}99`
+          }
+        }
+
         /* ---- vuelo de la pelota ---- */
         const f = flightRef.current
         const ball = ballRef.current
+        const shadow = ballShadowRef.current
         if (f.active && ball) {
           if (f.start === 0) f.start = time
           const t = Math.min(1, (time - f.start) / FLIGHT_MS)
           const cx = lerp(f.fromX, f.toX, t)
-          const cy = lerp(f.fromY, f.toY, t) - Math.sin(t * Math.PI) * ARC_H
+          const cyFlat = lerp(f.fromY, f.toY, t)
+          const cy = cyFlat - Math.sin(t * Math.PI) * ARC_H
           const scale = lerp(BALL_SCALE_START, BALL_SCALE_END, t)
-          ball.style.transform = `translate(${(cx / 100) * aw - BALL_R}px, ${(cy / 100) * ah - BALL_R}px) scale(${scale})`
+          ball.style.transform = `translate(${(cx / 100) * aw - BALL_R}px, ${(cy / 100) * ah - BALL_R}px) scale(${scale}) rotate(${t * 540}deg)`
           ball.style.opacity = '1'
-          if (t >= 1) { f.active = false; ball.style.opacity = '0'; resolveRef.current(f.toX, f.toY) }
+          // sombra de despegue: queda en la trayectoria "plana" y se desvanece con la profundidad
+          if (shadow) {
+            shadow.style.transform = `translate(${(cx / 100) * aw - 13}px, ${(cyFlat / 100) * ah - 2}px) scale(${1 - t * 0.5})`
+            shadow.style.opacity = String(0.5 * (1 - t))
+          }
+          // estela del color de la zona destino
+          const bt = ballTrailRef.current
+          bt.push({ x: cx, y: cy })
+          if (bt.length > 22) bt.shift()
+          if (t >= 1) {
+            f.active = false
+            if (shadow) shadow.style.opacity = '0'
+            resolveRef.current(f.toX, f.toY)
+          }
+        } else if (ballTrailRef.current.length) {
+          ballTrailRef.current.shift()
+          ballTrailRef.current.shift()
+        }
+
+        /* ---- rechace del balón (parada/fuera): física simple + fade ---- */
+        const rj = rejectRef.current
+        if (rj.active && ball) {
+          rj.vy += 0.085
+          rj.x += rj.vx * 0.32
+          rj.y += rj.vy * 0.32
+          const age = time - rj.born
+          ball.style.transform = `translate(${(rj.x / 100) * aw - BALL_R}px, ${(rj.y / 100) * ah - BALL_R}px) scale(0.6) rotate(${age * 0.4}deg)`
+          ball.style.opacity = String(Math.max(0, 1 - age / 650))
+          if (age > 650 || rj.y > 106) { rj.active = false; ball.style.opacity = '0' }
         }
 
         /* ---- canvas: tamaño + dpr ---- */
@@ -317,6 +443,23 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
         const ctx = canvas.getContext('2d')!
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
         ctx.clearRect(0, 0, aw, ah)
+
+        /* ---- estelas: mira (fantasmas blancos) y balón (color de la zona destino) ---- */
+        for (let i = 0; i < ptrTrail.length - 1; i++) {
+          ctx.beginPath()
+          ctx.arc((ptrTrail[i].x / 100) * aw, (ptrTrail[i].y / 100) * ah, 1.5 + (i / ptrTrail.length) * 2.5, 0, Math.PI * 2)
+          ctx.fillStyle = `rgba(255,255,255,${(i / ptrTrail.length) * 0.22})`
+          ctx.fill()
+        }
+        const bt = ballTrailRef.current
+        for (let i = 0; i < bt.length; i++) {
+          ctx.beginPath()
+          ctx.arc((bt[i].x / 100) * aw, (bt[i].y / 100) * ah, 2 + (i / bt.length) * 4, 0, Math.PI * 2)
+          ctx.globalAlpha = (i / bt.length) * 0.45
+          ctx.fillStyle = flightRef.current.trailColor
+          ctx.fill()
+        }
+        ctx.globalAlpha = 1
 
         const l = levelsRef.current
         const sys = nugSysRef.current!
@@ -373,6 +516,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   }
 
   const effZones = ZONES.map((z) => scaleZone(z, zoneScale(levels)))
+  effZonesRef.current = effZones // espejo para el bucle (color de la mira) sin alocar por frame
 
   const upgRows: UpgRow[] = UPG_ORDER.map((key) => {
     const { txt, maxed } = upgradeDesc(key, levels)
@@ -405,34 +549,61 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
           onMouseLeave={onMouseLeave}
           style={styles.area}
         >
-          <div className="net" />
+          {/* red con profundidad (ondula al marcar) */}
+          <div ref={netRef} className="net" />
 
-          {/* zonas (escaladas por Mira amplia; solo referencia visual) */}
+          {/* césped con bandas de corte + línea de gol */}
+          <div className="grass" />
+
+          {/* postes + travesaño */}
+          <div className="post post-l" />
+          <div className="post post-r" />
+          <div className="post crossbar" />
+
+          {/* zonas (escaladas por Mira amplia; brackets de esquina, glow en escuadra) */}
           {effZones.map((z) => (
-            <div key={z.id} style={{
-              position: 'absolute', left: `${z.x}%`, top: `${z.y}%`, width: `${z.w}%`, height: `${z.h}%`,
-              border: `2px dashed ${z.color}`, background: `${z.color}1a`, borderRadius: 4,
-              display: 'flex', alignItems: 'flex-start', justifyContent: 'center', pointerEvents: 'none',
-            }}>
-              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: z.color, marginTop: 2, textShadow: '0 1px 2px #000' }}>
+            <div
+              key={z.id}
+              className={z.kind === 'escuadra' ? 'zone zone-glow' : 'zone'}
+              style={{
+                left: `${z.x}%`, top: `${z.y}%`, width: `${z.w}%`, height: `${z.h}%`,
+                backgroundColor: `${z.color}0d`,
+                '--zc': z.color,
+              } as React.CSSProperties}
+            >
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: z.color, marginTop: 3, textShadow: '0 1px 2px #000' }}>
                 {z.label} ×{z.kind === 'escuadra' ? escuadraMult(levels) : z.kind === 'centro' ? 2 : 1}
               </span>
             </div>
           ))}
 
-          {/* portero (no escala) */}
-          <div style={{
-            position: 'absolute', left: `${PORTERO.x}%`, top: `${PORTERO.y}%`, width: `${PORTERO.w}%`, height: `${PORTERO.h}%`,
-            background: 'linear-gradient(180deg,#dc2626,#7f1d1d)', border: '2px solid #fca5a5', borderRadius: '8px 8px 4px 4px',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none', boxShadow: '0 0 14px #ef444466',
-          }}>
-            <span style={{ fontSize: 11, fontWeight: 800, color: '#fff', letterSpacing: 1 }}>PORTERO</span>
+          {/* portero: el contenedor es el hitbox ESTÁTICO; la figura interior se mueve (sway/estirada) */}
+          <div style={{ position: 'absolute', left: `${PORTERO.x}%`, top: `${PORTERO.y}%`, width: `${PORTERO.w}%`, height: `${PORTERO.h}%`, pointerEvents: 'none' }}>
+            <div ref={porteroFigRef} style={{ position: 'absolute', inset: 0 }}>
+              <div className="goalie">
+                <div className="goalie-head" />
+                <div className="goalie-glove gl" />
+                <div className="goalie-glove gr" />
+                <div className="goalie-body">
+                  <span style={{ fontSize: 9, fontWeight: 800, color: '#fff', letterSpacing: 1 }}>PORTERO</span>
+                </div>
+                <div className="goalie-leg ll" />
+                <div className="goalie-leg lr" />
+              </div>
+            </div>
           </div>
 
-          <div style={styles.frame} />
+          {/* viñeta + focos de estadio */}
+          <div className="vignette" />
 
-          {/* canvas de nuggets (encima de zonas, debajo de pelota/mira) */}
+          {/* canvas de nuggets y estelas (encima de zonas, debajo de pelota/mira) */}
           <canvas ref={canvasRef} className="nug-canvas" />
+
+          {/* balón estático en el pie (chuta con element.animate) */}
+          <div ref={footBallRef} className="ball foot-ball" />
+
+          {/* sombra de despegue del balón */}
+          <div ref={ballShadowRef} className="ball-shadow" />
 
           {/* pelota en vuelo */}
           <div ref={ballRef} className="ball" style={{ width: BALL_R * 2, height: BALL_R * 2, opacity: 0 }} />
@@ -445,6 +616,11 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
               </svg>
             )}
           </div>
+
+          {/* ripples de impacto en la red */}
+          {ripples.map((rp) => (
+            <div key={rp.id} className="ripple" style={{ left: `${rp.x}%`, top: `${rp.y}%`, color: rp.color }} />
+          ))}
 
           {/* textos flotantes */}
           {floaters.map((fl) => (
@@ -465,7 +641,6 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
         <UpgradePanel rows={upgRows} gold={goldUi} onBuy={onBuy} />
       </div>
 
-      <div style={styles.foot}>▲ el pie</div>
       <p style={styles.hint}>
         Clic / <kbd style={styles.kbd}>ESPACIO</kbd> para chutar · barre los <b style={{ color: '#fbbf24' }}>nuggets</b> con el ratón ·
         la <b style={{ color: '#ffd23f' }}>escuadra</b> da el oro gordo
@@ -526,8 +701,6 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'linear-gradient(180deg,#0f2018,#0a1510)', border: '4px solid #cbd5e1', borderRadius: 6,
     boxShadow: '0 10px 40px #000a, inset 0 0 60px #0006', cursor: 'crosshair', overflow: 'hidden',
   },
-  frame: { position: 'absolute', inset: 0, border: '3px solid #e2e8f088', borderRadius: 4, pointerEvents: 'none' },
-  foot: { fontSize: 12, color: '#64748b', fontWeight: 600, letterSpacing: 1, marginTop: -4 },
   hint: { fontSize: 13, color: '#64748b', margin: 0, textAlign: 'center' },
   kbd: { background: '#1e293b', border: '1px solid #475569', borderRadius: 4, padding: '1px 6px', fontSize: 12, color: '#cbd5e1' },
   victory: {
@@ -544,11 +717,81 @@ const styles: Record<string, React.CSSProperties> = {
 
 const css = `
 .net {
-  position:absolute; inset:0; pointer-events:none; opacity:.35;
+  position:absolute; inset:0 0 7% 0; pointer-events:none; opacity:.3; will-change:transform;
   background-image: linear-gradient(#ffffff22 1px, transparent 1px), linear-gradient(90deg, #ffffff22 1px, transparent 1px);
   background-size: 22px 22px;
+  mask-image: radial-gradient(ellipse at 50% 45%, #fff6 0%, #fff 75%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 45%, #fff6 0%, #fff 75%);
 }
+.grass {
+  position:absolute; left:0; right:0; bottom:0; height:7%; pointer-events:none;
+  background: repeating-linear-gradient(90deg, #15803d 0 48px, #166534 48px 96px);
+  border-top: 3px solid #f8fafccc;
+  box-shadow: 0 -6px 14px #0007;
+}
+.post { position:absolute; pointer-events:none; z-index:2; background: linear-gradient(90deg,#f8fafc,#cbd5e1 60%,#94a3b8); box-shadow: 0 0 10px #0009, inset 0 0 3px #fff; }
+.post-l { left:0; top:0; bottom:7%; width:9px; border-radius:0 4px 4px 0; }
+.post-r { right:0; top:0; bottom:7%; width:9px; border-radius:4px 0 0 4px; background: linear-gradient(270deg,#f8fafc,#cbd5e1 60%,#94a3b8); }
+.crossbar { left:0; right:0; top:0; height:9px; border-radius:0 0 4px 4px; background: linear-gradient(180deg,#f8fafc,#cbd5e1 60%,#94a3b8); }
+.vignette {
+  position:absolute; inset:0; pointer-events:none;
+  background:
+    radial-gradient(ellipse at 50% 40%, transparent 52%, #00000052 100%),
+    radial-gradient(ellipse 38% 22% at 8% 0%, #ffffff0d, transparent 60%),
+    radial-gradient(ellipse 38% 22% at 92% 0%, #ffffff0d, transparent 60%);
+}
+.zone {
+  position:absolute; pointer-events:none; border-radius:6px;
+  display:flex; align-items:flex-start; justify-content:center;
+  background-image:
+    linear-gradient(var(--zc),var(--zc)), linear-gradient(var(--zc),var(--zc)),
+    linear-gradient(var(--zc),var(--zc)), linear-gradient(var(--zc),var(--zc)),
+    linear-gradient(var(--zc),var(--zc)), linear-gradient(var(--zc),var(--zc)),
+    linear-gradient(var(--zc),var(--zc)), linear-gradient(var(--zc),var(--zc));
+  background-repeat: no-repeat;
+  background-size: 14px 2px, 2px 14px, 14px 2px, 2px 14px, 14px 2px, 2px 14px, 14px 2px, 2px 14px;
+  background-position: top left, top left, top right, top right, bottom left, bottom left, bottom right, bottom right;
+  transition: left .25s ease, top .25s ease, width .25s ease, height .25s ease;
+}
+.zone-glow::after {
+  content:''; position:absolute; inset:0; border-radius:6px; pointer-events:none;
+  box-shadow: 0 0 16px var(--zc), inset 0 0 16px var(--zc);
+  opacity:.14; animation: zpulse 2.4s ease-in-out infinite;
+}
+@keyframes zpulse { 50% { opacity:.38; } }
+.goalie { position:absolute; inset:0; animation: goalie-sway 2.4s ease-in-out infinite alternate; transform-origin: bottom center; }
+@keyframes goalie-sway { from { transform: translateX(-5%) rotate(-1.4deg); } to { transform: translateX(5%) rotate(1.4deg); } }
+.goalie-head {
+  position:absolute; left:50%; top:0; transform:translateX(-50%); width:27%; aspect-ratio:1; border-radius:50%;
+  background: radial-gradient(circle at 38% 35%, #f5c89e, #d99c66 75%, #b97f43); border:2px solid #7f1d1d; z-index:1;
+}
+.goalie-body {
+  position:absolute; left:16%; right:16%; top:24%; bottom:22%;
+  background: linear-gradient(180deg,#dc2626,#7f1d1d); border:2px solid #fca5a5; border-radius:10px 10px 6px 6px;
+  display:flex; align-items:center; justify-content:center; box-shadow:0 0 14px #ef444466;
+}
+.goalie-glove { position:absolute; top:26%; width:19%; aspect-ratio:1; border-radius:50%; background: radial-gradient(circle at 35% 35%, #fde68a, #f59e0b 80%); border:2px solid #92400e; z-index:2; }
+.goalie-glove.gl { left:-3%; }
+.goalie-glove.gr { right:-3%; }
+.goalie-leg { position:absolute; bottom:0; width:14%; height:24%; background: linear-gradient(180deg,#1e293b,#0f172a); border-radius:0 0 5px 5px; }
+.goalie-leg.ll { left:28%; }
+.goalie-leg.lr { right:28%; }
 .nug-canvas { position:absolute; inset:0; pointer-events:none; }
+.ball-shadow {
+  position:absolute; top:0; left:0; width:26px; height:9px; border-radius:50%;
+  background: radial-gradient(ellipse, #000d, transparent 72%);
+  will-change:transform,opacity; opacity:0; pointer-events:none;
+}
+.ball.foot-ball {
+  left:50%; bottom:1.4%; width:20px; height:20px; margin-left:-10px; top:auto;
+  opacity:1; box-shadow:0 0 12px #ffffff55, 0 2px 6px #0009;
+}
+.ripple {
+  position:absolute; width:72px; height:72px; margin:-36px 0 0 -36px; border-radius:50%;
+  border:2.5px solid currentColor; box-shadow:0 0 12px currentColor; pointer-events:none; z-index:9;
+  animation: ripple .55s ease-out forwards;
+}
+@keyframes ripple { from { transform: scale(.15); opacity:.95; } to { transform: scale(1.5); opacity:0; } }
 .pointer {
   position:absolute; top:0; left:0; will-change:transform; border-radius:50%; border:2px solid #fff;
   background: radial-gradient(circle at 35% 35%, #fff 0%, #fff 18%, transparent 22%), radial-gradient(circle, #ffffff10 40%, transparent 60%);
@@ -561,7 +804,12 @@ const css = `
 @keyframes cd-deplete { from { stroke-dashoffset:0; } to { stroke-dashoffset:100.5; } }
 .ball {
   position:absolute; top:0; left:0; will-change:transform,opacity; border-radius:50%;
-  background: radial-gradient(circle at 32% 30%, #fff 0%, #e8e8e8 40%, #b8b8b8 75%, #888 100%);
+  background:
+    radial-gradient(circle at 50% 28%, #1e293b 0 11%, transparent 12%),
+    radial-gradient(circle at 25% 56%, #1e293b 0 9%, transparent 10%),
+    radial-gradient(circle at 75% 56%, #1e293b 0 9%, transparent 10%),
+    radial-gradient(circle at 50% 84%, #1e293b 0 8%, transparent 9%),
+    radial-gradient(circle at 32% 30%, #ffffff 0%, #e8e8e8 45%, #b8b8b8 80%, #888 100%);
   border:1.5px solid #fff; box-shadow:0 0 16px #fff6, 0 4px 10px #0008; pointer-events:none;
 }
 .floater {
