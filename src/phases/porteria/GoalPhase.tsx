@@ -1,4 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { rand, lerp, inRect, formatNum } from '../../core/utils'
+import { costOf, type UpgradeDef } from '../../core/economy'
+import {
+  createNuggetSystem, createBot, stepBot, drawBot, drawMagnetRing,
+  type NuggetSystem, type Bot,
+} from '../../core/nuggets'
+import { hot, useColdVersion, buyUpgrade } from '../../core/store'
+import { Hud } from '../../ui/Hud'
+import { UpgradePanel, type UpgRow } from '../../ui/UpgradePanel'
 
 /* ============================================================================
  * DIALES DE BALANCE  ─ tocar aquí para iterar el feel rápido
@@ -23,29 +32,17 @@ const COOLDOWN_MS = 700
 const COOLDOWN_FLOOR = 250  // suelo duro del CD
 
 // Economía / meta ------------------------------------------------------------
-const META_GOLD = 100_000   // oro acumulado para "batir al portero"
+export const META_GOLD = 100_000   // oro acumulado para "batir al portero"
 
-// Nuggets: física -----------------------------------------------------------
-const NUGGET_R = 7
-const GRAVITY = 0.42
-const FLOOR_DAMP = 0.5      // amortiguación al rebotar
-const H_FRICTION = 0.82     // fricción horizontal al tocar suelo
-const SETTLE_V = 0.7        // por debajo de esto, se asienta
-const MAX_NUGGETS = 150     // cap en pantalla (auto-absorbe los más antiguos)
-const K_MIN = 3, K_MAX = 8  // nuggets por gol
+// Nuggets: física y recogida → diales compartidos en core/nuggets.ts (DEFAULT_NUGGET_CFG)
 
 // Nuggets: recogida (imán) --------------------------------------------------
 const MAGNET_BASE = 34      // radio de imán del ratón (px) ── pequeño al inicio
 const MAGNET_STEP = 20      // +radio por nivel de Imán
-const PULL_ACCEL = 1.8      // aceleración hacia el atractor (zip al cursor)
-const MAX_PULL = 24         // velocidad máx mientras es atraído
-const ABSORB_DIST = 12      // distancia a la que se absorbe
 
 // Recolector (bot idle combinado: auto-dispara + recoge) --------------------
 const BOT_R_BASE = 42       // radio de aspiración del bot (px)
 const BOT_R_STEP = 14
-const BOT_SPEED = 3.2       // velocidad máx de desplazamiento del bot
-const BOT_ACCEL = 0.45
 const AUTO_IDLE_DELAY = 1400 // ms sin tiro manual antes de que el bot dispare
 // Extremos seguros del raso (×1, esquivan al portero) para el auto-tiro
 const RASO_SAFE = [{ x: 18, y: 80 }, { x: 82, y: 80 }]
@@ -57,7 +54,7 @@ const RASO_SAFE = [{ x: 18, y: 80 }, { x: 82, y: 80 }]
 type UpgKey = 'potencia' | 'rosca' | 'botas' | 'cadencia' | 'mira' | 'iman' | 'recolector'
 type Levels = Record<UpgKey, number>
 
-const UPG: Record<UpgKey, { name: string; base: number; growth: number; color: string }> = {
+const UPG: Record<UpgKey, UpgradeDef> = {
   potencia:   { name: 'Potencia',     base: 10,  growth: 1.12, color: '#60a5fa' },
   rosca:      { name: 'Rosca',        base: 60,  growth: 1.18, color: '#ffd23f' },
   botas:      { name: 'Botas de oro', base: 200, growth: 1.23, color: '#fbbf24' },
@@ -68,8 +65,6 @@ const UPG: Record<UpgKey, { name: string; base: number; growth: number; color: s
 }
 const UPG_ORDER: UpgKey[] = ['potencia', 'rosca', 'botas', 'cadencia', 'mira', 'iman', 'recolector']
 
-const cost = (key: UpgKey, lv: number) => Math.floor(UPG[key].base * UPG[key].growth ** lv)
-
 // --- selectores derivados (funciones puras de los niveles) ---
 const oroBase = (l: Levels) => 1 + l.potencia
 const bonusGlobal = (l: Levels) => 1 + l.botas * 0.25
@@ -79,6 +74,13 @@ const miraPct = (l: Levels) => Math.min(60, l.mira * 6)         // cap +60%
 const zoneScale = (l: Levels) => 1 + miraPct(l) / 100
 const magnetR = (l: Levels) => MAGNET_BASE + l.iman * MAGNET_STEP
 const botR = (l: Levels) => BOT_R_BASE + Math.max(0, l.recolector - 1) * BOT_R_STEP
+
+// lee los niveles tipados desde el store (mejoras futuras toleradas con ?? 0)
+const readLevels = (raw: Record<string, number>): Levels => {
+  const l = {} as Levels
+  for (const k of UPG_ORDER) l[k] = raw[k] ?? 0
+  return l
+}
 
 /* ============================================================================
  * ZONAS (rectángulos en % del área) + PORTERO
@@ -104,25 +106,6 @@ const scaleZone = (z: Zone, s: number): Zone => ({
   h: z.h * s,
 })
 
-/* ============================================================================
- * Helpers
- * ========================================================================== */
-
-const rand = (min: number, max: number) => Math.random() * (max - min) + min
-const lerp = (a: number, b: number, t: number) => a + (b - a) * t
-const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
-
-const inRect = (px: number, py: number, r: { x: number; y: number; w: number; h: number }) =>
-  px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h
-
-function formatNum(n: number): string {
-  if (n < 1000) return Math.floor(n).toString()
-  const u = ['', 'K', 'M', 'B', 'T']
-  let i = 0
-  while (n >= 1000 && i < u.length - 1) { n /= 1000; i++ }
-  return n.toFixed(n < 10 ? 2 : n < 100 ? 1 : 0) + u[i]
-}
-
 type Resolution = { kind: 'gol' | 'parada' | 'fuera'; zone: ZoneKind | null; label: string; color: string }
 
 // Resuelve sobre las zonas YA escaladas. PORTERO no escala.
@@ -141,14 +124,15 @@ function resolveTarget(tx: number, ty: number, zones: Zone[]): Resolution {
 type Vec = { x: number; y: number }
 type Flight = { active: boolean; start: number; fromX: number; fromY: number; toX: number; toY: number }
 type Floater = { id: number; x: number; y: number; label: string; color: string }
-type Nugget = { x: number; y: number; vx: number; vy: number; value: number; rot: number; rotV: number; collecting: boolean; flash: number }
-type Bot = { x: number; y: number; vx: number; vy: number; wx: number; wy: number }
 
 /* ============================================================================
  * Componente
  * ========================================================================== */
 
-export function GoalGame() {
+export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean }) {
+  useColdVersion() // re-render frío en compra/desbloqueo/cambio de fase
+  const P = hot.phases.porteria
+
   // --- refs de animación (NUNCA provocan re-render) ---
   const areaRef = useRef<HTMLDivElement>(null)
   const pointerRef = useRef<HTMLDivElement>(null)
@@ -161,36 +145,35 @@ export function GoalGame() {
   const flightRef = useRef<Flight>({ active: false, start: 0, fromX: 0, fromY: 0, toX: 0, toY: 0 })
   const cooldownRef = useRef(false)
 
-  // economía (fuente de verdad en refs; React solo lee de forma throttle)
-  const goldRef = useRef(0)        // oro gastable
-  const totalRef = useRef(0)       // oro acumulado (para la meta; no baja al gastar)
-  const goldDispRef = useRef(0)    // valor mostrado (lerp → "tick")
-  const nuggetsRef = useRef<Nugget[]>([])
+  // economía caliente: fuente de verdad en store.hot (mutación directa, sin commit)
+  const goldDispRef = useRef(P.gold)    // valor mostrado (lerp → "tick")
+  const nugSysRef = useRef<NuggetSystem | null>(null)
+  if (!nugSysRef.current) nugSysRef.current = createNuggetSystem()
   const mouseRef = useRef({ x: 0, y: 0, inside: false })
-  const botRef = useRef<Bot>({ x: 200, y: 300, vx: 0, vy: 0, wx: 200, wy: 300 })
+  const botRef = useRef<Bot>(createBot(200, 300))
   const lastManualShotRef = useRef(0)
   const autoSideRef = useRef(false)
   const cssWRef = useRef(760)
   const cssHRef = useRef(475)
 
-  const levelsRef = useRef<Levels>({ potencia: 0, rosca: 0, botas: 0, cadencia: 0, mira: 0, iman: 0, recolector: 0 })
+  const levels = readLevels(P.levels)
+  const levelsRef = useRef<Levels>(levels)
+  levelsRef.current = levels // espejo siempre fresco para el bucle/resolución
+
   const resolveRef = useRef<(tx: number, ty: number) => void>(() => {})
   const shootAtRef = useRef<(tx: number, ty: number, manual: boolean) => void>(() => {})
 
   // --- estado React (baja frecuencia) ---
-  const [levels, setLevels] = useState<Levels>({ potencia: 0, rosca: 0, botas: 0, cadencia: 0, mira: 0, iman: 0, recolector: 0 })
-  const [goldUi, setGoldUi] = useState(0)
-  const [totalUi, setTotalUi] = useState(0)
-  const [goles, setGoles] = useState(0)
-  const [fallos, setFallos] = useState(0)
+  const [goldUi, setGoldUi] = useState(P.gold)
+  const [totalUi, setTotalUi] = useState(P.total)
+  const [goles, setGoles] = useState(P.goles)
+  const [fallos, setFallos] = useState(P.fallos)
   const [cooldown, setCooldown] = useState(false)
   const [cdKey, setCdKey] = useState(0)
   const [cdMs, setCdMs] = useState(COOLDOWN_MS)
   const [floaters, setFloaters] = useState<Floater[]>([])
   const [victory, setVictory] = useState(false)
   const floaterId = useRef(0)
-
-  levelsRef.current = levels // espejo siempre fresco para el bucle/resolución
 
   // Normaliza la velocidad inicial a SPEED una sola vez
   useEffect(() => {
@@ -200,6 +183,13 @@ export function GoalGame() {
     v.y = (v.y / m) * SPEED
   }, [])
 
+  // Al desmontar la fase, los nuggets en pantalla se vuelcan a la cartera (no se pierde oro)
+  useEffect(() => () => {
+    const v = nugSysRef.current!.drain()
+    P.gold += v
+    P.total += v
+  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+
   // --- resolución del tiro: feedback + genera nuggets (NO suma oro directo) ---
   resolveRef.current = (tx: number, ty: number) => {
     const l = levelsRef.current
@@ -207,13 +197,13 @@ export function GoalGame() {
     const res = resolveTarget(tx, ty, zones)
 
     if (res.kind === 'gol') {
-      setGoles((g) => g + 1)
+      P.goles++
       // valor del gol según zona
       const mult = res.zone === 'escuadra' ? escuadraMult(l) : res.zone === 'centro' ? 2 : 1
       const oroGol = Math.max(1, Math.round(oroBase(l) * mult * bonusGlobal(l)))
       spawnNuggets(tx, ty, oroGol)
     } else {
-      setFallos((f) => f + 1)
+      P.fallos++
       // shake imperativo (NO remonta el área/canvas/mira como haría un key change)
       areaRef.current?.animate(
         [
@@ -236,32 +226,9 @@ export function GoalGame() {
   // Materializa el oro del gol en K nuggets físicos desde el punto de impacto.
   const spawnNuggets = (txPct: number, tyPct: number, oroGol: number) => {
     const cw = cssWRef.current, ch = cssHRef.current
-    const ix = (txPct / 100) * cw
-    const iy = (tyPct / 100) * ch
-    let K = clamp(3 + Math.floor(oroGol / 4), K_MIN, K_MAX)
-    K = Math.max(1, Math.min(K, oroGol))            // cada nugget vale ≥1
-    const base = Math.floor(oroGol / K)
-    const ng = nuggetsRef.current
-    for (let i = 0; i < K; i++) {
-      const value = i === K - 1 ? oroGol - base * (K - 1) : base // resto al último → suma exacta
-      ng.push({
-        x: ix + rand(-6, 6),
-        y: iy + rand(-6, 6),
-        vx: rand(-3.5, 3.5),
-        vy: rand(-9, -4),                            // sale hacia arriba
-        value,
-        rot: rand(0, Math.PI * 2),
-        rotV: rand(-0.25, 0.25),
-        collecting: false,
-        flash: 0,
-      })
-    }
-    // cap: auto-absorbe los más antiguos (su valor NO se pierde)
-    while (ng.length > MAX_NUGGETS) {
-      const old = ng.shift()!
-      goldRef.current += old.value
-      totalRef.current += old.value
-    }
+    const absorbed = nugSysRef.current!.spawn((txPct / 100) * cw, (tyPct / 100) * ch, oroGol)
+    P.gold += absorbed
+    P.total += absorbed
   }
 
   // --- disparar a un objetivo concreto (manual = mira; auto = raso seguro) ---
@@ -293,12 +260,14 @@ export function GoalGame() {
   // --- throttle: refresca la UI (panel/meta) sin tocar el bucle de 60fps ---
   useEffect(() => {
     const id = window.setInterval(() => {
-      setGoldUi(goldRef.current)
-      setTotalUi(totalRef.current)
-      if (totalRef.current >= META_GOLD) setVictory(true)
+      setGoldUi(P.gold)
+      setTotalUi(P.total)
+      setGoles(P.goles)
+      setFallos(P.fallos)
+      if (P.total >= META_GOLD) setVictory(true)
     }, 120)
     return () => window.clearInterval(id)
-  }, [])
+  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- BUCLE ÚNICO: mira + vuelo + física de nuggets + bot + auto-tiro ---
   useEffect(() => {
@@ -350,91 +319,28 @@ export function GoalGame() {
         ctx.clearRect(0, 0, aw, ah)
 
         const l = levelsRef.current
-        const ng = nuggetsRef.current
+        const sys = nugSysRef.current!
         const mr = magnetR(l)
-        const keepR = mr * 1.4
         const botActive = l.recolector >= 1
         const bR = botR(l)
         const m = mouseRef.current
+        const b = botRef.current
 
         /* ---- bot recolector: persigue el nugget más cercano / deambula ---- */
-        if (botActive) {
-          const b = botRef.current
-          let best: Nugget | null = null, bd = Infinity
-          for (const n of ng) { const d = Math.hypot(n.x - b.x, n.y - b.y); if (d < bd) { bd = d; best = n } }
-          let tx: number, ty: number
-          if (best) { tx = best.x; ty = best.y }
-          else {
-            if (Math.hypot(b.x - b.wx, b.y - b.wy) < 24) { b.wx = rand(aw * 0.15, aw * 0.85); b.wy = rand(ah * 0.55, ah * 0.92) }
-            tx = b.wx; ty = b.wy
-          }
-          const dx = tx - b.x, dy = ty - b.y, d = Math.hypot(dx, dy) || 1
-          b.vx += (dx / d) * BOT_ACCEL; b.vy += (dy / d) * BOT_ACCEL
-          const sp = Math.hypot(b.vx, b.vy)
-          if (sp > BOT_SPEED) { b.vx = (b.vx / sp) * BOT_SPEED; b.vy = (b.vy / sp) * BOT_SPEED }
-          b.x = clamp(b.x + b.vx, bR, aw - bR); b.y = clamp(b.y + b.vy, bR, ah - bR)
-        }
+        if (botActive) stepBot(b, sys.list, aw, ah, bR)
 
-        /* ---- física + recogida de nuggets ---- */
-        const survivors: Nugget[] = []
-        for (const n of ng) {
-          // elegir atractor: ratón (imán) tiene prioridad, si no el bot
-          let ax: number | null = null, ay = 0
-          if (m.inside) {
-            const d = Math.hypot(n.x - m.x, n.y - m.y)
-            if (d < (n.collecting ? keepR : mr)) { ax = m.x; ay = m.y }
-          }
-          if (ax === null && botActive) {
-            const b = botRef.current
-            const d = Math.hypot(n.x - b.x, n.y - b.y)
-            if (d < (n.collecting ? bR * 1.4 : bR)) { ax = b.x; ay = b.y }
-          }
+        /* ---- física + recogida de nuggets (imán del ratón > bot) ---- */
+        const absorbed = sys.step(
+          aw, ah,
+          m.inside ? { x: m.x, y: m.y, r: mr } : null,
+          botActive ? { x: b.x, y: b.y, r: bR } : null,
+        )
+        if (absorbed > 0) { P.gold += absorbed; P.total += absorbed }
 
-          if (ax !== null) {
-            n.collecting = true
-            const dx = ax - n.x, dy = ay - n.y, d = Math.hypot(dx, dy) || 1
-            n.vx += (dx / d) * PULL_ACCEL; n.vy += (dy / d) * PULL_ACCEL
-            const sp = Math.hypot(n.vx, n.vy)
-            if (sp > MAX_PULL) { n.vx = (n.vx / sp) * MAX_PULL; n.vy = (n.vy / sp) * MAX_PULL }
-            n.x += n.vx; n.y += n.vy
-            if (d < ABSORB_DIST) {                    // absorbido → suma oro
-              goldRef.current += n.value
-              totalRef.current += n.value
-              continue
-            }
-          } else {
-            n.collecting = false
-            n.vy += GRAVITY
-            n.x += n.vx; n.y += n.vy
-            if (n.x < NUGGET_R) { n.x = NUGGET_R; n.vx = -n.vx * FLOOR_DAMP }
-            else if (n.x > aw - NUGGET_R) { n.x = aw - NUGGET_R; n.vx = -n.vx * FLOOR_DAMP }
-            const floorY = ah - NUGGET_R
-            if (n.y > floorY) {
-              n.y = floorY; n.vy = -n.vy * FLOOR_DAMP; n.vx *= H_FRICTION
-              if (Math.abs(n.vy) < SETTLE_V) n.vy = 0
-            } else if (n.y < NUGGET_R) { n.y = NUGGET_R; n.vy = -n.vy * FLOOR_DAMP }
-            n.rot += n.rotV
-          }
-          survivors.push(n)
-        }
-        nuggetsRef.current = survivors
-
-        /* ---- dibujar nuggets ---- */
-        for (const n of survivors) drawNugget(ctx, n)
-
-        /* ---- dibujar bot + su radio ---- */
-        if (botActive) drawBot(ctx, botRef.current, bR, time)
-
-        /* ---- dibujar radio del imán bajo el ratón ---- */
-        if (m.inside) {
-          ctx.beginPath()
-          ctx.arc(m.x, m.y, mr, 0, Math.PI * 2)
-          ctx.strokeStyle = '#f472b655'
-          ctx.lineWidth = 1.5
-          ctx.setLineDash([4, 4])
-          ctx.stroke()
-          ctx.setLineDash([])
-        }
+        /* ---- dibujar nuggets / bot / radio del imán ---- */
+        sys.draw(ctx)
+        if (botActive) drawBot(ctx, b, bR, time)
+        if (m.inside) drawMagnetRing(ctx, m.x, m.y, mr)
 
         /* ---- auto-tiro idle del recolector (raso seguro alterno) ---- */
         if (botActive && !cooldownRef.current && time - lastManualShotRef.current > AUTO_IDLE_DELAY) {
@@ -444,7 +350,7 @@ export function GoalGame() {
         }
 
         /* ---- tick animado del contador de oro ---- */
-        goldDispRef.current += (goldRef.current - goldDispRef.current) * 0.25
+        goldDispRef.current += (P.gold - goldDispRef.current) * 0.25
         if (goldElRef.current) goldElRef.current.textContent = formatNum(goldDispRef.current)
       }
       raf = requestAnimationFrame(loop)
@@ -452,7 +358,7 @@ export function GoalGame() {
 
     raf = requestAnimationFrame(loop)
     return () => cancelAnimationFrame(raf)
-  }, [])
+  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- ratón en coords del área (ref, sin re-render) ---
   const onMouseMove = (e: React.MouseEvent) => {
@@ -461,46 +367,33 @@ export function GoalGame() {
   }
   const onMouseLeave = () => { mouseRef.current.inside = false }
 
-  // --- comprar mejora (lee de levelsRef → robusto ante clics síncronos rápidos) ---
-  const buy = (key: UpgKey) => {
-    const lv = levelsRef.current[key]
-    const c = cost(key, lv)
-    if (goldRef.current < c) return
-    goldRef.current -= c
-    const next = { ...levelsRef.current, [key]: lv + 1 }
-    levelsRef.current = next
-    setLevels(next)
-    setGoldUi(goldRef.current)
+  // --- comprar mejora (el store lee de hot → robusto ante clics síncronos rápidos) ---
+  const onBuy = (key: string) => {
+    if (buyUpgrade('porteria', key, UPG[key as UpgKey])) setGoldUi(P.gold)
   }
 
   const effZones = ZONES.map((z) => scaleZone(z, zoneScale(levels)))
-  const progress = Math.min(100, (totalUi / META_GOLD) * 100)
+
+  const upgRows: UpgRow[] = UPG_ORDER.map((key) => {
+    const { txt, maxed } = upgradeDesc(key, levels)
+    return { key, def: UPG[key], lv: levels[key], cost: cost(key, levels[key]), desc: txt, maxed }
+  })
 
   return (
     <div style={styles.page}>
       <style>{css}</style>
 
       {/* ---- HUD: oro + meta ---- */}
-      <header style={styles.hud}>
-        <div style={styles.goldBox}>
-          <span style={styles.goldIcon}>●</span>
-          <span ref={goldElRef} style={styles.goldNum}>0</span>
-          <span style={styles.goldLbl}>ORO</span>
-        </div>
-        <div style={styles.metaWrap}>
-          <div style={styles.metaTop}>
-            <span>Batir al portero</span>
-            <span>{formatNum(totalUi)} / {formatNum(META_GOLD)}</span>
-          </div>
-          <div style={styles.metaBar}>
-            <div style={{ ...styles.metaFill, width: `${progress}%` }} />
-          </div>
-        </div>
-        <div style={styles.tally}>
-          <span style={{ color: '#4ade80' }}>{goles} goles</span>
-          <span style={{ color: '#ef4444' }}>{fallos} fallos</span>
-        </div>
-      </header>
+      <Hud
+        goldElRef={goldElRef}
+        metaLabel={props.victorySeen ? '✓ portero batido' : 'Batir al portero'}
+        totalUi={totalUi}
+        metaGold={META_GOLD}
+        tally={[
+          { label: `${goles} goles`, color: '#4ade80' },
+          { label: `${fallos} fallos`, color: '#ef4444' },
+        ]}
+      />
 
       <div style={styles.stage}>
         {/* ---- CAMPO ---- */}
@@ -558,48 +451,18 @@ export function GoalGame() {
             <div key={fl.id} className="floater" style={{ left: `${fl.x}%`, top: `${fl.y}%`, color: fl.color }}>{fl.label}</div>
           ))}
 
-          {/* banner de victoria */}
-          {victory && (
+          {/* banner de victoria (solo la primera vez) */}
+          {victory && !props.victorySeen && (
             <div style={styles.victory}>
               <div style={styles.victoryTitle}>¡PORTERO BATIDO!</div>
-              <div style={styles.victorySub}>{formatNum(totalRef.current)} de oro acumulado</div>
-              <button style={styles.sala2} disabled>SALA 2 · próximamente</button>
+              <div style={styles.victorySub}>{formatNum(P.total)} de oro acumulado</div>
+              <button style={styles.sala2} onClick={props.onVictory}>SALA 2 · ¡A LA CANCHA! 🏀</button>
             </div>
           )}
         </div>
 
         {/* ---- PANEL DE MEJORAS ---- */}
-        <aside style={styles.panel}>
-          <h2 style={styles.panelTitle}>MEJORAS</h2>
-          {UPG_ORDER.map((key) => {
-            const lv = levels[key]
-            const c = cost(key, lv)
-            const afford = goldUi >= c
-            const { txt, maxed } = upgradeDesc(key, levels)
-            return (
-              <button
-                key={key}
-                onClick={() => buy(key)}
-                disabled={!afford || maxed}
-                style={{
-                  ...styles.upg,
-                  borderColor: UPG[key].color + (afford && !maxed ? 'aa' : '33'),
-                  opacity: maxed ? 0.5 : afford ? 1 : 0.55,
-                  cursor: afford && !maxed ? 'pointer' : 'not-allowed',
-                }}
-              >
-                <div style={styles.upgTop}>
-                  <span style={{ fontWeight: 800, color: UPG[key].color }}>{UPG[key].name}</span>
-                  <span style={styles.upgLv}>Nv {lv}</span>
-                </div>
-                <div style={styles.upgEff}>{txt}</div>
-                <div style={{ ...styles.upgCost, color: maxed ? '#64748b' : afford ? '#fbbf24' : '#64748b' }}>
-                  {maxed ? 'MÁX' : `● ${formatNum(c)}`}
-                </div>
-              </button>
-            )
-          })}
-        </aside>
+        <UpgradePanel rows={upgRows} gold={goldUi} onBuy={onBuy} />
       </div>
 
       <div style={styles.foot}>▲ el pie</div>
@@ -610,6 +473,8 @@ export function GoalGame() {
     </div>
   )
 }
+
+const cost = (key: UpgKey, lv: number) => costOf(UPG[key], lv)
 
 /* ============================================================================
  * Texto de efecto de cada mejora (current → next) + flag de tope
@@ -645,57 +510,6 @@ function bounce(v: Vec, axis: 'x' | 'y', sign: number) {
   if (axis === 'x') v.x = Math.abs(v.x) * sign; else v.y = Math.abs(v.y) * sign
 }
 
-/* ---- dibujo de un nugget (oro con brillo y rotación) ---- */
-function drawNugget(ctx: CanvasRenderingContext2D, n: Nugget) {
-  ctx.save()
-  ctx.translate(n.x, n.y)
-  ctx.rotate(n.rot)
-  if (n.collecting) { ctx.shadowColor = '#ffe066'; ctx.shadowBlur = 12 }
-  // cuerpo
-  ctx.beginPath()
-  ctx.arc(0, 0, NUGGET_R, 0, Math.PI * 2)
-  ctx.fillStyle = n.collecting ? '#ffe680' : '#f5c518'
-  ctx.fill()
-  ctx.lineWidth = 1.5
-  ctx.strokeStyle = '#b8860b'
-  ctx.stroke()
-  // brillo
-  ctx.beginPath()
-  ctx.arc(-NUGGET_R * 0.32, -NUGGET_R * 0.32, NUGGET_R * 0.34, 0, Math.PI * 2)
-  ctx.fillStyle = '#fffde0cc'
-  ctx.fill()
-  ctx.restore()
-}
-
-/* ---- dibujo del bot recolector + halo de su radio ---- */
-function drawBot(ctx: CanvasRenderingContext2D, b: Bot, r: number, time: number) {
-  // halo de radio
-  ctx.beginPath()
-  ctx.arc(b.x, b.y, r, 0, Math.PI * 2)
-  ctx.fillStyle = '#f8717111'
-  ctx.fill()
-  ctx.strokeStyle = '#f8717144'
-  ctx.lineWidth = 1.5
-  ctx.stroke()
-  // cuerpo (platillo pulsante)
-  const pulse = 1 + Math.sin(time / 200) * 0.08
-  ctx.save()
-  ctx.translate(b.x, b.y)
-  ctx.scale(pulse, pulse)
-  ctx.beginPath()
-  ctx.arc(0, 0, 10, 0, Math.PI * 2)
-  ctx.fillStyle = '#1e293b'
-  ctx.fill()
-  ctx.strokeStyle = '#f87171'
-  ctx.lineWidth = 2.5
-  ctx.stroke()
-  ctx.beginPath()
-  ctx.arc(0, 0, 3.5, 0, Math.PI * 2)
-  ctx.fillStyle = '#f87171'
-  ctx.fill()
-  ctx.restore()
-}
-
 /* ============================================================================
  * Estilos
  * ========================================================================== */
@@ -706,16 +520,6 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'radial-gradient(circle at 50% 0%, #1e3a2f 0%, #0b1411 70%)',
     fontFamily: 'system-ui, -apple-system, Segoe UI, sans-serif', color: '#e2e8f0', userSelect: 'none', padding: 16,
   },
-  hud: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 20, width: 'min(94vw, 1080px)', flexWrap: 'wrap' },
-  goldBox: { display: 'flex', alignItems: 'baseline', gap: 8 },
-  goldIcon: { color: '#fbbf24', fontSize: 18 },
-  goldNum: { fontSize: 34, fontWeight: 900, color: '#fbbf24', fontVariantNumeric: 'tabular-nums', minWidth: 80 },
-  goldLbl: { fontSize: 12, fontWeight: 700, letterSpacing: 2, color: '#a16207' },
-  metaWrap: { flex: 1, minWidth: 240, maxWidth: 460 },
-  metaTop: { display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8', marginBottom: 4, fontWeight: 600 },
-  metaBar: { height: 10, background: '#0f1f18', borderRadius: 6, overflow: 'hidden', border: '1px solid #1e3a2f' },
-  metaFill: { height: '100%', background: 'linear-gradient(90deg,#4ade80,#fbbf24)', transition: 'width 0.2s ease', borderRadius: 6 },
-  tally: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', fontSize: 12, fontWeight: 700, gap: 2 },
   stage: { display: 'flex', gap: 16, alignItems: 'flex-start', width: 'min(94vw, 1080px)', justifyContent: 'center', flexWrap: 'wrap' },
   area: {
     position: 'relative', width: 'min(90vw, 760px)', aspectRatio: '16 / 10', flexShrink: 0,
@@ -723,19 +527,6 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: '0 10px 40px #000a, inset 0 0 60px #0006', cursor: 'crosshair', overflow: 'hidden',
   },
   frame: { position: 'absolute', inset: 0, border: '3px solid #e2e8f088', borderRadius: 4, pointerEvents: 'none' },
-  panel: {
-    display: 'flex', flexDirection: 'column', gap: 7, width: 260, minWidth: 230, flex: '1 1 230px', maxWidth: 300,
-    background: '#0c1512cc', border: '1px solid #1e293b', borderRadius: 10, padding: 12,
-  },
-  panelTitle: { margin: '0 0 4px', fontSize: 13, fontWeight: 800, letterSpacing: 3, color: '#64748b' },
-  upg: {
-    textAlign: 'left', background: '#111c18', border: '1.5px solid', borderRadius: 8, padding: '8px 10px',
-    color: '#e2e8f0', font: 'inherit', display: 'flex', flexDirection: 'column', gap: 2, transition: 'opacity .15s',
-  },
-  upgTop: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13 },
-  upgLv: { fontSize: 11, color: '#94a3b8', fontWeight: 700 },
-  upgEff: { fontSize: 11, color: '#94a3b8' },
-  upgCost: { fontSize: 12, fontWeight: 800, marginTop: 2 },
   foot: { fontSize: 12, color: '#64748b', fontWeight: 600, letterSpacing: 1, marginTop: -4 },
   hint: { fontSize: 13, color: '#64748b', margin: 0, textAlign: 'center' },
   kbd: { background: '#1e293b', border: '1px solid #475569', borderRadius: 4, padding: '1px 6px', fontSize: 12, color: '#cbd5e1' },
@@ -745,7 +536,10 @@ const styles: Record<string, React.CSSProperties> = {
   },
   victoryTitle: { fontSize: 32, fontWeight: 900, color: '#fbbf24', letterSpacing: 2, textShadow: '0 0 20px #fbbf2466' },
   victorySub: { fontSize: 14, color: '#cbd5e1' },
-  sala2: { marginTop: 8, padding: '10px 20px', borderRadius: 8, border: '1px solid #475569', background: '#1e293b', color: '#94a3b8', fontWeight: 700, cursor: 'not-allowed' },
+  sala2: {
+    marginTop: 8, padding: '10px 20px', borderRadius: 8, border: '1px solid #fbbf24', background: '#1e293b',
+    color: '#fbbf24', fontWeight: 700, cursor: 'pointer', font: 'inherit', fontSize: 15,
+  },
 }
 
 const css = `
