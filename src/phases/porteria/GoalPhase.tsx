@@ -3,6 +3,7 @@ import { rand, lerp, inRect, formatNum } from '../../core/utils'
 import { costOf, type UpgradeDef } from '../../core/economy'
 import { createNuggetSystem, drawMagnetRing, type NuggetSystem } from '../../core/nuggets'
 import { hot, useColdVersion, buyUpgrade } from '../../core/store'
+import { sfx } from '../../core/audio'
 import { Hud } from '../../ui/Hud'
 import { UpgradePanel, type UpgRow } from '../../ui/UpgradePanel'
 
@@ -174,7 +175,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   levelsRef.current = levels // espejo siempre fresco para el bucle/resolución
   const effZonesRef = useRef<Zone[]>(ZONES)
 
-  const resolveRef = useRef<(tx: number, ty: number) => void>(() => {})
+  const resolveRef = useRef<(tx: number, ty: number, quiet?: boolean) => void>(() => {})
 
   // --- estado React (baja frecuencia) ---
   const [goldUi, setGoldUi] = useState(P.gold)
@@ -187,6 +188,8 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   const [floaters, setFloaters] = useState<Floater[]>([])
   const [ripples, setRipples] = useState<Ripple[]>([])
   const [victory, setVictory] = useState(false)
+  const victoryJingleRef = useRef(false)
+  const victorySeenRef = useRef(props.victorySeen ?? false)
   const floaterId = useRef(0)
 
   const pushRipple = (x: number, y: number, color: string) => {
@@ -211,7 +214,8 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- resolución del tiro: feedback + genera nuggets (NO suma oro directo) ---
-  resolveRef.current = (tx: number, ty: number) => {
+  // quiet = tiro del bot: mismo efecto, sonido atenuado
+  resolveRef.current = (tx: number, ty: number, quiet = false) => {
     const l = levelsRef.current
     const zones = ZONES.map((z) => scaleZone(z, zoneScale(l)))
     const res = resolveTarget(tx, ty, zones)
@@ -226,6 +230,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
       spawnNuggets(tx, ty, oroGol)
       // el balón entra: se lo traga la red + ripple + onda de la red
       if (ball) ball.style.opacity = '0'
+      if (res.zone === 'escuadra') sfx.escuadra(); else sfx.goal(quiet)
       pushRipple(tx, ty, res.color)
       netRef.current?.animate(
         [{ transform: 'scale(1)' }, { transform: 'scale(1.012) skewX(0.5deg)' }, { transform: 'scale(1)' }],
@@ -240,6 +245,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
       }
     } else {
       P.fallos++
+      if (res.kind === 'parada') sfx.parada(); else sfx.fuera()
       if (res.kind === 'parada') {
         // ESTIRADA del portero hacia el punto del tiro (visual; el hitbox no se mueve)
         const cx = PORTERO.x + PORTERO.w / 2
@@ -310,6 +316,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
     const res = resolveTarget(tx, ty, zones)
     const trailColor = res.kind === 'gol' ? res.color : '#94a3b8'
     flightRef.current = { active: true, start: 0, fromX: FOOT_X, fromY: FOOT_Y, toX: tx, toY: ty, trailColor }
+    sfx.kick()
     // chut del balón estático del pie
     footBallRef.current?.animate(
       [
@@ -346,7 +353,11 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
       setTotalUi(P.total)
       setGoles(P.goles)
       setFallos(P.fallos)
-      if (P.total >= META_GOLD) setVictory(true)
+      if (P.total >= META_GOLD && !victoryJingleRef.current) {
+        victoryJingleRef.current = true
+        setVictory(true)
+        if (!victorySeenRef.current) sfx.victory()
+      }
     }, 120)
     return () => window.clearInterval(id)
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
@@ -473,7 +484,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
 
         /* ---- física + recogida de nuggets (el imán del ratón es el ÚNICO recolector) ---- */
         const absorbed = sys.step(aw, ah, m.inside ? { x: m.x, y: m.y, r: mr } : null)
-        if (absorbed > 0) { P.gold += absorbed; P.total += absorbed }
+        if (absorbed > 0) { P.gold += absorbed; P.total += absorbed; sfx.coin() }
 
         /* ---- dibujar nuggets / radio del imán ---- */
         sys.draw(ctx)
@@ -500,7 +511,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
             if (t >= 1) {
               bf.active = false
               botBall.style.opacity = '0'
-              resolveRef.current(bf.toX, bf.toY)  // raso seguro → siempre gol ×1
+              resolveRef.current(bf.toX, bf.toY, true)  // raso seguro → siempre gol ×1 (sonido atenuado)
             }
           }
         }
@@ -525,7 +536,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
 
   // --- comprar mejora (el store lee de hot → robusto ante clics síncronos rápidos) ---
   const onBuy = (key: string) => {
-    if (buyUpgrade('porteria', key, UPG[key as UpgKey])) setGoldUi(P.gold)
+    if (buyUpgrade('porteria', key, UPG[key as UpgKey])) { setGoldUi(P.gold); sfx.buy() }
   }
 
   const effZones = ZONES.map((z) => scaleZone(z, zoneScale(levels)))

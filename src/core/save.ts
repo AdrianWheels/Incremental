@@ -11,6 +11,7 @@ export type SaveV1 = {
   schemaVersion: 1
   unlocked: PhaseId[]
   activePhase: PhaseId
+  muted?: boolean
   phases: Record<PhaseId, { gold: number; total: number; levels: Record<string, number>; goles: number; fallos: number }>
 }
 
@@ -50,6 +51,7 @@ export function loadSave(): void {
     if (isPhaseId(data.activePhase) && hot.unlocked.includes(data.activePhase)) {
       hot.activePhase = data.activePhase
     }
+    if (typeof data.muted === 'boolean') hot.muted = data.muted
   } catch (err) {
     console.warn('[save] save corrupto — respaldado y reseteado:', err)
     try {
@@ -64,6 +66,7 @@ export function writeSave(): void {
     schemaVersion: 1,
     unlocked: hot.unlocked,
     activePhase: hot.activePhase,
+    muted: hot.muted,
     phases: hot.phases,
   }
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)) } catch { /* storage no disponible */ }

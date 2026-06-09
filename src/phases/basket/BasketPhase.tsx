@@ -3,6 +3,7 @@ import { rand, lerp, formatNum } from '../../core/utils'
 import { costOf, type UpgradeDef } from '../../core/economy'
 import { createNuggetSystem, drawMagnetRing, type NuggetSystem } from '../../core/nuggets'
 import { hot, useColdVersion, buyUpgrade } from '../../core/store'
+import { sfx } from '../../core/audio'
 import { Hud } from '../../ui/Hud'
 import { UpgradePanel, type UpgRow } from '../../ui/UpgradePanel'
 
@@ -248,6 +249,7 @@ export function BasketPhase() {
       outcome, oro, label, color,
     }
     recoverUntilRef.current = performance.now() + RECOVER_MS
+    sfx.throwBall()
   }
 
   /* ---- hold-and-release (pointer + ESPACIO; release SIEMPRE en window) ---- */
@@ -257,6 +259,7 @@ export function BasketPhase() {
     if (now < recoverUntilRef.current) return
     chargeRef.current = { active: true, phase: 0, value: 0, lastT: now }
     setCharging(true)
+    sfx.chargeStart()
     // el defensor "huele" el tiro: si la posición es taponeable, adelanta su salto
     // (telegrafiado — el jugador ve el agachado y decide soltar antes o arriesgar)
     const def = defRef.current
@@ -307,6 +310,7 @@ export function BasketPhase() {
       if (victoryArmedRef.current && P.total >= META_GOLD_BASKET) {
         victoryArmedRef.current = false
         setVictory(true)
+        sfx.victory()
       }
     }, 120)
     return () => window.clearInterval(id)
@@ -378,11 +382,13 @@ export function BasketPhase() {
             if (f.outcome === 'swish' || f.outcome === 'normal') {
               P.goles++
               ball.style.opacity = '0'
+              if (f.outcome === 'swish') sfx.swish(comboRef.current); else sfx.basket()
               const absorbed = nugSysRef.current!.spawn(hoopPxX, hoopPxY, f.oro)
               if (absorbed > 0) { P.gold += absorbed; P.total += absorbed }
               pushFloater(HOOP.x, HOOP.y - 6, f.label, f.color)
             } else {
               P.fallos++
+              if (f.outcome === 'tapon') sfx.tapon(); else sfx.rim()
               pushFloater(f.toX, f.toY - 5, f.label, f.color)
               // rechace: el balón sale despedido con física simple y se desvanece
               rejectRef.current = {
@@ -435,7 +441,7 @@ export function BasketPhase() {
 
         /* ---- física + recogida (el imán del ratón es el ÚNICO recolector) ---- */
         const absorbed = sys.step(aw, ah, m.inside ? { x: m.x, y: m.y, r: mr } : null)
-        if (absorbed > 0) { P.gold += absorbed; P.total += absorbed }
+        if (absorbed > 0) { P.gold += absorbed; P.total += absorbed; sfx.coin() }
 
         sys.draw(ctx)
         if (m.inside) drawMagnetRing(ctx, m.x, m.y, mr)
@@ -460,6 +466,7 @@ export function BasketPhase() {
               ftBall.style.opacity = '0'
               // la mascota nunca falla ni hace swish; no toca el combo del jugador
               P.goles++
+              sfx.basket(true)  // atenuado: es la mascota
               const oroFt = Math.max(1, Math.round(tiroBase(l) * bonusCancha(l)))
               const abs2 = sys.spawn((HOOP.x / 100) * aw, ((HOOP.y + 4) / 100) * ah, oroFt)
               if (abs2 > 0) { P.gold += abs2; P.total += abs2 }
@@ -487,7 +494,7 @@ export function BasketPhase() {
   const onMouseLeave = () => { mouseRef.current.inside = false }
 
   const onBuy = (key: string) => {
-    if (buyUpgrade('basket', key, UPG[key as BKey])) setGoldUi(P.gold)
+    if (buyUpgrade('basket', key, UPG[key as BKey])) { setGoldUi(P.gold); sfx.buy() }
   }
 
   const upgRows: UpgRow[] = UPG_ORDER.map((key) => {

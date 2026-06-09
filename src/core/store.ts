@@ -24,10 +24,12 @@ export const hot: {
   phases: Record<PhaseId, PhaseHot>
   unlocked: PhaseId[]
   activePhase: PhaseId
+  muted: boolean
 } = {
   phases: { porteria: emptyPhase(), basket: emptyPhase() },
   unlocked: ['porteria'],
   activePhase: 'porteria',
+  muted: false,
 }
 
 let version = 0

@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
-import { hot, useColdVersion, isUnlocked, unlockPhase, switchPhase, type PhaseId } from './core/store'
+import { hot, useColdVersion, isUnlocked, unlockPhase, switchPhase, commit, type PhaseId } from './core/store'
 import { initPersistence } from './core/save'
+import { unlockAudio } from './core/audio'
 import { GoalPhase } from './phases/porteria/GoalPhase'
 import { BasketPhase } from './phases/basket/BasketPhase'
 
@@ -10,6 +11,17 @@ import { BasketPhase } from './phases/basket/BasketPhase'
 export function App() {
   useColdVersion()
   useEffect(() => initPersistence(), [])
+
+  // los navegadores bloquean el AudioContext hasta el primer gesto del usuario
+  useEffect(() => {
+    const unlock = () => unlockAudio()
+    window.addEventListener('pointerdown', unlock, { once: true })
+    window.addEventListener('keydown', unlock, { once: true })
+    return () => {
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('keydown', unlock)
+    }
+  }, [])
   const active = hot.activePhase
   const basketUnlocked = isUnlocked('basket')
 
@@ -23,6 +35,13 @@ export function App() {
       <nav style={styles.tabs}>
         <PhaseTab id="porteria" label="⚽ PORTERÍA" active={active} unlocked onPick={switchPhase} />
         <PhaseTab id="basket" label={basketUnlocked ? '🏀 CANCHA' : '🔒 CANCHA'} active={active} unlocked={basketUnlocked} onPick={switchPhase} />
+        <button
+          onClick={() => { hot.muted = !hot.muted; commit() }}
+          title={hot.muted ? 'Activar sonido' : 'Silenciar'}
+          style={{ ...styles.tab, borderColor: '#334155', color: hot.muted ? '#475569' : '#94a3b8', background: '#0c1512cc', cursor: 'pointer' }}
+        >
+          {hot.muted ? '🔇' : '🔊'}
+        </button>
       </nav>
       {active === 'porteria'
         ? <GoalPhase onVictory={onVictory} victorySeen={basketUnlocked} />
