@@ -258,6 +258,10 @@ export function BasketPhase() {
   /* ---- hold-and-release (pointer + ESPACIO; release SIEMPRE en window) ---- */
   const startCharge = () => {
     const now = performance.now()
+    // Registrar la INTENCIÓN manual aunque este intento quede bloqueado (vuelo del
+    // tiro libre de la mascota / recover): la mascota se aparta FT_IDLE_MS y el
+    // siguiente intento del jugador encuentra el hueco libre.
+    lastManualShotRef.current = now
     if (chargeRef.current.active || flightRef.current.active || rejectRef.current.active) return
     if (now < recoverUntilRef.current) return
     chargeRef.current = { active: true, phase: 0, value: 0, lastT: now }

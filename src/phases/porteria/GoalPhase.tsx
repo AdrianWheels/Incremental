@@ -324,6 +324,10 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   shootAtRef.current = shootAt
 
   const shoot = useCallback(() => {
+    // Registrar la INTENCIÓN manual aunque el cooldown descarte este tiro: sin esto,
+    // el bot dispara en el mismo frame en que expira el CD y monopoliza el cañón
+    // (el jugador nunca consigue colar un tiro manual — inanición).
+    lastManualShotRef.current = performance.now()
     const p = posRef.current
     shootAt(p.x, p.y, true) // captura la posición de la mira
   }, [shootAt])
