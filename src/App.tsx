@@ -1,4 +1,6 @@
+import { useEffect } from 'react'
 import { hot, useColdVersion, isUnlocked, unlockPhase, switchPhase, type PhaseId } from './core/store'
+import { initPersistence } from './core/save'
 import { GoalPhase } from './phases/porteria/GoalPhase'
 
 /* Monta SOLO la fase activa: garantiza un único bucle rAF vivo (el cleanup del
@@ -6,6 +8,7 @@ import { GoalPhase } from './phases/porteria/GoalPhase'
 
 export function App() {
   useColdVersion()
+  useEffect(() => initPersistence(), [])
   const active = hot.activePhase
   const basketUnlocked = isUnlocked('basket')
 
