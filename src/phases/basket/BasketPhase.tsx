@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { rand, lerp, formatNum } from '../../core/utils'
 import { costOf, type UpgradeDef } from '../../core/economy'
-import {
-  createNuggetSystem, createBot, stepBot, drawBot, drawMagnetRing,
-  type NuggetSystem, type Bot,
-} from '../../core/nuggets'
+import { createNuggetSystem, drawMagnetRing, type NuggetSystem } from '../../core/nuggets'
 import { hot, useColdVersion, buyUpgrade } from '../../core/store'
 import { Hud } from '../../ui/Hud'
 import { UpgradePanel, type UpgRow } from '../../ui/UpgradePanel'
@@ -36,14 +33,14 @@ const DEF_BLOCK_X = 9             // % de distancia horizontal para taponar
 const DEF_BLOCK_WINDOW: [number, number] = [0.15, 0.70]  // tramo del salto que tapona
 const DEF_W = 7, DEF_H = 24       // tamaño del defensor (%)
 
-// Mascota (bot idle: tiros libres + recoge) -----------------------------------
+// Mascota (bot con balón PROPIO: tiros libres independientes del jugador; NO recoge) --
 const FT_X = 58                   // posición del tiro libre
-const FT_IDLE_MS = 1600           // ms sin tiro manual antes del tiro libre automático
-const FT_COOLDOWN_MS = 1200       // cadencia propia de la mascota (el idle debe rendir < que jugar)
+const FT_BASE_MS = 2000           // ms entre tiros libres a nivel 1
+const FT_DECAY = 0.9              // cada nivel extra recorta la cadencia ×0.9
+const FT_FLOOR_MS = 700           // suelo duro de la cadencia
+const FT_FLIGHT_MS = 420          // vuelo del tiro libre
 const MAGNET_BASE = 34
 const MAGNET_STEP = 20
-const BOT_R_BASE = 42
-const BOT_R_STEP = 14
 
 // Economía / meta --------------------------------------------------------------
 export const META_GOLD_BASKET = 250_000
@@ -90,7 +87,8 @@ const comboCap = (l: Levels) => l.combo > 0 ? 1 + l.combo : 0 // máx swishes ap
 const fintaDodge = (l: Levels) => Math.min(0.6, l.finta * 0.08) // cap 60% de tapones esquivados
 const bonusCancha = (l: Levels) => 1 + l.zapas * 0.25
 const magnetR = (l: Levels) => MAGNET_BASE + l.iman * MAGNET_STEP
-const botR = (l: Levels) => BOT_R_BASE + Math.max(0, l.mascota - 1) * BOT_R_STEP
+const ftMs = (l: Levels) =>
+  Math.max(FT_FLOOR_MS, Math.round(FT_BASE_MS * FT_DECAY ** Math.max(0, l.mascota - 1)))
 
 const readLevels = (raw: Record<string, number>): Levels => {
   const l = {} as Levels
@@ -140,7 +138,9 @@ export function BasketPhase() {
   const rejectRef = useRef<Reject>({ active: false, x: 0, y: 0, vx: 0, vy: 0, born: 0 })
   const defRef = useRef<Def>({ x: 56, dir: 1, jumping: false, crouching: false, jumpStart: 0, nextJumpAt: 0, lastT: 0 })
   const comboRef = useRef(0)
-  const lastManualShotRef = useRef(0)
+  // mascota: balón y reloj propios — nunca toca la carga/vuelo del jugador
+  const ftBallRef = useRef<HTMLDivElement>(null)
+  const ftFlightRef = useRef({ active: false, start: 0 })
   const nextFtAtRef = useRef(0)
 
   const goldDispRef = useRef(P.gold)
@@ -150,7 +150,6 @@ export function BasketPhase() {
     nugSysRef.current = createNuggetSystem({ spawnVx: [-1.6, 1.6], spawnVy: [0.5, 2.5] })
   }
   const mouseRef = useRef({ x: 0, y: 0, inside: false })
-  const botRef = useRef<Bot>(createBot(300, 300))
   const cssWRef = useRef(760)
   const cssHRef = useRef(475)
 
@@ -188,24 +187,21 @@ export function BasketPhase() {
     P.total += v
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ---- resolución del tiro: se decide AL SOLTAR; el vuelo es presentación ---- */
-  const releaseShot = (manual: boolean, value: number, fromPos: ShotPos | 'ft') => {
+  /* ---- resolución del tiro MANUAL: se decide AL SOLTAR; el vuelo es presentación.
+   *      (la mascota tiene su propio mini-sistema en el bucle y no pasa por aquí) ---- */
+  const releaseShot = (value: number, fromPos: ShotPos) => {
     const l = levelsRef.current
-    const isFt = fromPos === 'ft'
-    const pos = isFt ? null : POS[fromPos]
-    const fromX = isFt ? FT_X : pos!.x
-    const ms = isFt ? 420 : pos!.flightMs
-    const arcH = isFt ? 22 : pos!.arcH
+    const pos = POS[fromPos]
+    const fromX = pos.x
+    const ms = pos.flightMs
+    const arcH = pos.arcH
 
     let outcome: Outcome
-    if (isFt) {
-      outcome = 'normal' // la mascota nunca falla ni hace swish; el defensor la ignora
-    } else {
+    {
       const def = defRef.current
-      const blockable = pos!.blockable
       const jumpT = def.jumping ? (performance.now() - def.jumpStart) / DEF_JUMP_MS : -1
-      const blocked = blockable
-        && Math.abs(def.x - pos!.x) < DEF_BLOCK_X
+      const blocked = pos.blockable
+        && Math.abs(def.x - pos.x) < DEF_BLOCK_X
         && jumpT >= DEF_BLOCK_WINDOW[0] && jumpT <= DEF_BLOCK_WINDOW[1]
         && Math.random() >= fintaDodge(l)
       if (blocked) outcome = 'tapon'
@@ -221,7 +217,7 @@ export function BasketPhase() {
     // oro y combo (el combo solo sube con swish; se rompe al fallar o ser taponado)
     let oro = 0, label = '', color = '#94a3b8'
     if (outcome === 'swish' || outcome === 'normal') {
-      const mult = isFt ? 1 : posMult(fromPos as ShotPos, l)
+      const mult = posMult(fromPos, l)
       let swishFactor = 1
       if (outcome === 'swish') {
         comboRef.current = Math.min(comboRef.current + 1, Math.max(1, comboCap(l)))
@@ -230,7 +226,7 @@ export function BasketPhase() {
       oro = Math.max(1, Math.round(tiroBase(l) * mult * swishFactor * bonusCancha(l)))
       label = outcome === 'swish'
         ? `SWISH${comboRef.current > 1 ? ` ×${comboRef.current}` : ''}!`
-        : isFt ? 'TIRO LIBRE' : 'CANASTA'
+        : 'CANASTA'
       color = outcome === 'swish' ? '#ffd23f' : '#4ade80'
     } else {
       comboRef.current = 0
@@ -252,16 +248,11 @@ export function BasketPhase() {
       outcome, oro, label, color,
     }
     recoverUntilRef.current = performance.now() + RECOVER_MS
-    if (manual) lastManualShotRef.current = performance.now()
   }
 
   /* ---- hold-and-release (pointer + ESPACIO; release SIEMPRE en window) ---- */
   const startCharge = () => {
     const now = performance.now()
-    // Registrar la INTENCIÓN manual aunque este intento quede bloqueado (vuelo del
-    // tiro libre de la mascota / recover): la mascota se aparta FT_IDLE_MS y el
-    // siguiente intento del jugador encuentra el hueco libre.
-    lastManualShotRef.current = now
     if (chargeRef.current.active || flightRef.current.active || rejectRef.current.active) return
     if (now < recoverUntilRef.current) return
     chargeRef.current = { active: true, phase: 0, value: 0, lastT: now }
@@ -278,7 +269,7 @@ export function BasketPhase() {
     if (!c.active) return
     c.active = false
     setCharging(false)
-    if (!cancel) releaseShot(true, c.value, posKeyRef.current)
+    if (!cancel) releaseShot(c.value, posKeyRef.current)
   }
   const startChargeRef = useRef(startCharge); startChargeRef.current = startCharge
   const endChargeRef = useRef(endCharge); endChargeRef.current = endCharge
@@ -440,33 +431,41 @@ export function BasketPhase() {
         const sys = nugSysRef.current!
         const mr = magnetR(l)
         const botActive = l.mascota >= 1
-        const bR = botR(l)
         const m = mouseRef.current
-        const b = botRef.current
 
-        /* ---- mascota: persigue nuggets / deambula + recoge ---- */
-        if (botActive) stepBot(b, sys.list, aw, ah, bR)
-
-        const absorbed = sys.step(
-          aw, ah,
-          m.inside ? { x: m.x, y: m.y, r: mr } : null,
-          botActive ? { x: b.x, y: b.y, r: bR } : null,
-        )
+        /* ---- física + recogida (el imán del ratón es el ÚNICO recolector) ---- */
+        const absorbed = sys.step(aw, ah, m.inside ? { x: m.x, y: m.y, r: mr } : null)
         if (absorbed > 0) { P.gold += absorbed; P.total += absorbed }
 
         sys.draw(ctx)
-        if (botActive) drawBot(ctx, b, bR, time)
         if (m.inside) drawMagnetRing(ctx, m.x, m.y, mr)
 
-        /* ---- tiro libre automático de la mascota (idle) ---- */
-        if (
-          botActive && !chargeRef.current.active && !f.active && !rj.active
-          && time >= recoverUntilRef.current
-          && time >= nextFtAtRef.current
-          && time - lastManualShotRef.current > FT_IDLE_MS
-        ) {
-          nextFtAtRef.current = time + FT_COOLDOWN_MS
-          releaseShotRef.current(false, 0, 'ft')
+        /* ---- mascota: tiro libre con balón y reloj PROPIOS, independiente del jugador ---- */
+        if (botActive) {
+          const mf = ftFlightRef.current
+          if (!mf.active && time >= nextFtAtRef.current) {
+            mf.active = true; mf.start = 0
+            nextFtAtRef.current = time + ftMs(l)
+          }
+          const ftBall = ftBallRef.current
+          if (mf.active && ftBall) {
+            if (mf.start === 0) mf.start = time
+            const t = Math.min(1, (time - mf.start) / FT_FLIGHT_MS)
+            const cx = lerp(FT_X, HOOP.x, t)
+            const cy = lerp(FLOOR_Y - 10, HOOP.y, t) - Math.sin(t * Math.PI) * 22
+            ftBall.style.transform = `translate(${(cx / 100) * aw - BALL_R}px, ${(cy / 100) * ah - BALL_R}px)`
+            ftBall.style.opacity = '1'
+            if (t >= 1) {
+              mf.active = false
+              ftBall.style.opacity = '0'
+              // la mascota nunca falla ni hace swish; no toca el combo del jugador
+              P.goles++
+              const oroFt = Math.max(1, Math.round(tiroBase(l) * bonusCancha(l)))
+              const abs2 = sys.spawn((HOOP.x / 100) * aw, ((HOOP.y + 4) / 100) * ah, oroFt)
+              if (abs2 > 0) { P.gold += abs2; P.total += abs2 }
+              pushFloater(HOOP.x, HOOP.y - 6, 'TIRO LIBRE', '#4ade80')
+            }
+          }
         }
 
         /* ---- tick animado del contador de oro ---- */
@@ -479,8 +478,6 @@ export function BasketPhase() {
     raf = requestAnimationFrame(loop)
     return () => cancelAnimationFrame(raf)
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
-
-  const releaseShotRef = useRef(releaseShot); releaseShotRef.current = releaseShot
 
   // --- ratón en coords del área (ref, sin re-render) ---
   const onMouseMove = (e: React.MouseEvent) => {
@@ -581,6 +578,14 @@ export function BasketPhase() {
           {/* balón (vuelo + rechace por transform) */}
           <div ref={ballRef} className="bball" style={{ width: BALL_R * 2, height: BALL_R * 2, opacity: 0 }} />
 
+          {/* mascota: avatar en la línea de tiros libres + su propio balón */}
+          {levels.mascota >= 1 && (
+            <>
+              <div className="mascot" style={{ left: `${FT_X}%`, top: `${FLOOR_Y}%` }}>🐧</div>
+              <div ref={ftBallRef} className="bball" style={{ width: BALL_R * 2, height: BALL_R * 2, opacity: 0 }} />
+            </>
+          )}
+
           {/* barra de potencia */}
           <div className={charging ? 'power-bar charging' : 'power-bar'} style={styles.bar}>
             <div ref={barFillRef} className="bar-fill" />
@@ -642,10 +647,11 @@ function upgradeDesc(key: BKey, l: Levels): { txt: string; maxed: boolean } {
     }
     case 'zapas':  return { txt: `global +${l.zapas * 25}% → +${(l.zapas + 1) * 25}%`, maxed: false }
     case 'iman':   return { txt: `radio ${magnetR(l)}px → ${magnetR(n('iman', l.iman + 1))}px`, maxed: false }
-    case 'mascota':
-      return l.mascota === 0
-        ? { txt: 'activa bot idle (tiros libres + recoge)', maxed: false }
-        : { txt: `bot radio ${botR(l)}px → ${botR(n('mascota', l.mascota + 1))}px`, maxed: false }
+    case 'mascota': {
+      if (l.mascota === 0) return { txt: 'activa mascota (tiros libres automáticos)', maxed: false }
+      const cur = ftMs(l), nxt = ftMs(n('mascota', l.mascota + 1))
+      return { txt: `TL cada ${cur}ms${cur <= FT_FLOOR_MS ? ' (suelo)' : ` → ${nxt}ms`}`, maxed: cur <= FT_FLOOR_MS }
+    }
   }
 }
 
@@ -710,6 +716,12 @@ const css = `
   position:absolute; transform:translate(-50%,-92%); font-size:34px; pointer-events:none; z-index:6;
   filter: drop-shadow(0 4px 6px #000a);
 }
+.mascot {
+  position:absolute; transform:translate(-50%,-92%); font-size:26px; pointer-events:none; z-index:6;
+  filter: drop-shadow(0 4px 6px #000a);
+  animation: mascot-bob 1.6s ease-in-out infinite;
+}
+@keyframes mascot-bob { 0%,100% { transform:translate(-50%,-92%) translateY(0); } 50% { transform:translate(-50%,-92%) translateY(-4px); } }
 .pos-mark {
   position:absolute; transform:translateX(-50%); padding:3px 10px; border-radius:999px; border:1.5px solid;
   font-size:10px; font-weight:800; letter-spacing:1px; font-family:inherit; cursor:pointer; z-index:7;

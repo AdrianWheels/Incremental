@@ -1,7 +1,9 @@
-/* Sistema compartido de nuggets (física + imán + recogida) y bot recolector.
- * Extraído LITERALMENTE del prototipo de portería — el orden de integración
- * (acelerar → clamp velocidad → mover → absorber con la distancia pre-movimiento)
- * y la prioridad ratón > bot son parte del game feel validado: no "mejorar de paso".
+/* Sistema compartido de nuggets (física + imán + recogida).
+ * El orden de integración (acelerar → clamp velocidad → mover → absorber con la
+ * distancia pre-movimiento) es parte del game feel validado: no "mejorar de paso".
+ * El ÚNICO recolector es el imán del ratón (decisión de diseño [BOT.1]): el oro se
+ * acumula en el suelo y, al superar el cap, los nuggets asentados se FUSIONAN en
+ * pilas de mayor valor (tier 0-3) — nunca se absorbe solo.
  * Pensado para llamarse desde el bucle rAF de cada fase: cero asignaciones extra por frame. */
 
 import { rand, clamp } from './utils'
@@ -10,8 +12,8 @@ export type Nugget = {
   x: number; y: number; vx: number; vy: number
   value: number; rot: number; rotV: number
   collecting: boolean; flash: number
+  tier: number   // 0 = nugget suelto; 1-3 = pila fusionada (se dibuja como monedas apiladas)
 }
-export type Bot = { x: number; y: number; vx: number; vy: number; wx: number; wy: number }
 export type Attractor = { x: number; y: number; r: number } | null
 
 export type NuggetCfg = {
@@ -20,7 +22,7 @@ export type NuggetCfg = {
   floorDamp: number      // amortiguación al rebotar
   hFriction: number      // fricción horizontal al tocar suelo
   settleV: number        // por debajo de esto, se asienta
-  maxNuggets: number     // cap en pantalla (auto-absorbe los más antiguos)
+  maxNuggets: number     // cap en pantalla (al superarlo, fusiona los asentados más antiguos)
   kMin: number; kMax: number   // nuggets por anotación
   pullAccel: number      // aceleración hacia el atractor
   maxPull: number        // velocidad máx mientras es atraído
@@ -47,10 +49,10 @@ export const DEFAULT_NUGGET_CFG: NuggetCfg = {
 export type NuggetSystem = {
   list: Nugget[]
   /** Materializa totalValue en K nuggets desde (px, py) en píxeles; suma EXACTA (resto al último).
-   *  Devuelve el oro auto-absorbido por el cap (el caller lo suma a su cartera). */
+   *  Devuelve el oro auto-absorbido SOLO si el cap no pudo fusionar (caso raro: nada asentado). */
   spawn(px: number, py: number, totalValue: number): number
   /** Un frame de física + imán + recogida. Devuelve el oro absorbido este frame. */
-  step(w: number, h: number, mouse: Attractor, bot: Attractor): number
+  step(w: number, h: number, mouse: Attractor): number
   draw(ctx: CanvasRenderingContext2D): void
   /** Vacía el sistema devolviendo el valor restante (p.ej. al desmontar la fase). */
   drain(): number
@@ -76,28 +78,41 @@ export function createNuggetSystem(over?: Partial<NuggetCfg>): NuggetSystem {
         rotV: rand(-0.25, 0.25),
         collecting: false,
         flash: 1,   // pop de escala/brillo al nacer (decae en step)
+        tier: 0,
       })
     }
-    // cap: auto-absorbe los más antiguos (su valor NO se pierde)
+    // cap: FUSIONA los dos asentados más antiguos en una pila (el valor NO se pierde
+    // ni se recoge solo). Fallback rarísimo (nada asentado): absorbe el más antiguo.
     let absorbed = 0
-    while (list.length > cfg.maxNuggets) absorbed += list.shift()!.value
+    while (list.length > cfg.maxNuggets) {
+      let i = -1, j = -1
+      for (let k = 0; k < list.length; k++) {
+        const n = list[k]
+        if (!n.collecting && n.vy === 0) { if (i < 0) i = k; else { j = k; break } }
+      }
+      if (i >= 0 && j >= 0) {
+        const a = list[i], b = list[j]
+        a.value += b.value
+        a.tier = Math.min(3, Math.max(a.tier, b.tier) + 1)
+        a.flash = 1
+        list.splice(j, 1)
+      } else {
+        absorbed += list.shift()!.value
+      }
+    }
     return absorbed
   }
 
-  const step = (w: number, h: number, mouse: Attractor, bot: Attractor): number => {
+  const step = (w: number, h: number, mouse: Attractor): number => {
     let absorbed = 0
     const survivors: Nugget[] = []
     for (const n of list) {
       if (n.flash > 0.02) n.flash *= 0.88
-      // elegir atractor: ratón (imán) tiene prioridad, si no el bot
+      // único atractor: el imán del ratón
       let ax: number | null = null, ay = 0
       if (mouse) {
         const d = Math.hypot(n.x - mouse.x, n.y - mouse.y)
         if (d < (n.collecting ? mouse.r * 1.4 : mouse.r)) { ax = mouse.x; ay = mouse.y }
-      }
-      if (ax === null && bot) {
-        const d = Math.hypot(n.x - bot.x, n.y - bot.y)
-        if (d < (n.collecting ? bot.r * 1.4 : bot.r)) { ax = bot.x; ay = bot.y }
       }
 
       if (ax !== null) {
@@ -147,27 +162,41 @@ export function createNuggetSystem(over?: Partial<NuggetCfg>): NuggetSystem {
   return sys
 }
 
-/* ---- dibujo de un nugget (oro con brillo y rotación) ---- */
+/* ---- dibujo de un nugget: moneda suelta (tier 0, rota) o pila de monedas (tier 1-3) ---- */
 function drawNugget(ctx: CanvasRenderingContext2D, n: Nugget, r: number) {
   ctx.save()
   ctx.translate(n.x, n.y)
-  ctx.rotate(n.rot)
   if (n.flash > 0.02) ctx.scale(1 + n.flash * 0.9, 1 + n.flash * 0.9)
   if (n.collecting) { ctx.shadowColor = '#ffe066'; ctx.shadowBlur = 12 }
-  // cuerpo
+  const fill = n.collecting ? '#ffe680' : n.flash > 0.3 ? '#fff3bf' : '#f5c518'
+  if (n.tier === 0) {
+    ctx.rotate(n.rot)
+    drawCoin(ctx, 0, 0, r, fill)
+  } else {
+    // pila: monedas de abajo arriba, ligeramente desplazadas (jitter determinista por rot)
+    const rr = r * (1 + n.tier * 0.22)
+    const coins = n.tier + 1
+    for (let k = 0; k < coins; k++) {
+      const jx = Math.sin(n.rot * 7 + k * 2.4) * rr * 0.18
+      drawCoin(ctx, jx, -k * rr * 0.72, rr, fill)
+    }
+  }
+  ctx.restore()
+}
+
+function drawCoin(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, fill: string) {
   ctx.beginPath()
-  ctx.arc(0, 0, r, 0, Math.PI * 2)
-  ctx.fillStyle = n.collecting ? '#ffe680' : n.flash > 0.3 ? '#fff3bf' : '#f5c518'
+  ctx.arc(x, y, r, 0, Math.PI * 2)
+  ctx.fillStyle = fill
   ctx.fill()
   ctx.lineWidth = 1.5
   ctx.strokeStyle = '#b8860b'
   ctx.stroke()
   // brillo
   ctx.beginPath()
-  ctx.arc(-r * 0.32, -r * 0.32, r * 0.34, 0, Math.PI * 2)
+  ctx.arc(x - r * 0.32, y - r * 0.32, r * 0.34, 0, Math.PI * 2)
   ctx.fillStyle = '#fffde0cc'
   ctx.fill()
-  ctx.restore()
 }
 
 /* ---- anillo del imán bajo el ratón ---- */
@@ -181,62 +210,3 @@ export function drawMagnetRing(ctx: CanvasRenderingContext2D, x: number, y: numb
   ctx.setLineDash([])
 }
 
-/* ============================================================================
- * Bot recolector (persecución de nuggets / deambulación). El auto-tiro idle
- * es lógica de tiro de cada fase y NO vive aquí.
- * ========================================================================== */
-
-export const BOT_SPEED = 3.2       // velocidad máx de desplazamiento del bot
-export const BOT_ACCEL = 0.45
-
-export function createBot(x: number, y: number): Bot {
-  return { x, y, vx: 0, vy: 0, wx: x, wy: y }
-}
-
-export function stepBot(
-  b: Bot, targets: Nugget[], w: number, h: number, r: number,
-  speed = BOT_SPEED, accel = BOT_ACCEL,
-) {
-  let best: Nugget | null = null, bd = Infinity
-  for (const n of targets) { const d = Math.hypot(n.x - b.x, n.y - b.y); if (d < bd) { bd = d; best = n } }
-  let tx: number, ty: number
-  if (best) { tx = best.x; ty = best.y }
-  else {
-    if (Math.hypot(b.x - b.wx, b.y - b.wy) < 24) { b.wx = rand(w * 0.15, w * 0.85); b.wy = rand(h * 0.55, h * 0.92) }
-    tx = b.wx; ty = b.wy
-  }
-  const dx = tx - b.x, dy = ty - b.y, d = Math.hypot(dx, dy) || 1
-  b.vx += (dx / d) * accel; b.vy += (dy / d) * accel
-  const sp = Math.hypot(b.vx, b.vy)
-  if (sp > speed) { b.vx = (b.vx / sp) * speed; b.vy = (b.vy / sp) * speed }
-  b.x = clamp(b.x + b.vx, r, w - r); b.y = clamp(b.y + b.vy, r, h - r)
-}
-
-/* ---- dibujo del bot recolector + halo de su radio ---- */
-export function drawBot(ctx: CanvasRenderingContext2D, b: Bot, r: number, time: number) {
-  // halo de radio
-  ctx.beginPath()
-  ctx.arc(b.x, b.y, r, 0, Math.PI * 2)
-  ctx.fillStyle = '#f8717111'
-  ctx.fill()
-  ctx.strokeStyle = '#f8717144'
-  ctx.lineWidth = 1.5
-  ctx.stroke()
-  // cuerpo (platillo pulsante)
-  const pulse = 1 + Math.sin(time / 200) * 0.08
-  ctx.save()
-  ctx.translate(b.x, b.y)
-  ctx.scale(pulse, pulse)
-  ctx.beginPath()
-  ctx.arc(0, 0, 10, 0, Math.PI * 2)
-  ctx.fillStyle = '#1e293b'
-  ctx.fill()
-  ctx.strokeStyle = '#f87171'
-  ctx.lineWidth = 2.5
-  ctx.stroke()
-  ctx.beginPath()
-  ctx.arc(0, 0, 3.5, 0, Math.PI * 2)
-  ctx.fillStyle = '#f87171'
-  ctx.fill()
-  ctx.restore()
-}

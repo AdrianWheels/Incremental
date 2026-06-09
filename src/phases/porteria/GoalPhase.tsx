@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { rand, lerp, inRect, formatNum } from '../../core/utils'
 import { costOf, type UpgradeDef } from '../../core/economy'
-import {
-  createNuggetSystem, createBot, stepBot, drawBot, drawMagnetRing,
-  type NuggetSystem, type Bot,
-} from '../../core/nuggets'
+import { createNuggetSystem, drawMagnetRing, type NuggetSystem } from '../../core/nuggets'
 import { hot, useColdVersion, buyUpgrade } from '../../core/store'
 import { Hud } from '../../ui/Hud'
 import { UpgradePanel, type UpgRow } from '../../ui/UpgradePanel'
@@ -40,11 +37,13 @@ export const META_GOLD = 100_000   // oro acumulado para "batir al portero"
 const MAGNET_BASE = 34      // radio de imán del ratón (px) ── pequeño al inicio
 const MAGNET_STEP = 20      // +radio por nivel de Imán
 
-// Recolector (bot idle combinado: auto-dispara + recoge) --------------------
-const BOT_R_BASE = 42       // radio de aspiración del bot (px)
-const BOT_R_STEP = 14
-const AUTO_IDLE_DELAY = 1400 // ms sin tiro manual antes de que el bot dispare
-// Extremos seguros del raso (×1, esquivan al portero) para el auto-tiro
+// Delantero bot (tira con su PROPIO balón, independiente del jugador; NO recoge) --
+const BOT_X = 10            // posición del bot (% ancho, junto al poste izquierdo)
+const BOT_FIRE_BASE = 1800  // ms entre tiros del bot a nivel 1
+const BOT_FIRE_DECAY = 0.9  // cada nivel extra del bot recorta la cadencia ×0.9
+const BOT_FIRE_FLOOR = 600  // suelo duro de la cadencia del bot
+const BOT_FLIGHT_MS = 420   // vuelo del balón del bot
+// Extremos seguros del raso (×1, esquivan al portero) para el tiro del bot
 const RASO_SAFE = [{ x: 18, y: 80 }, { x: 82, y: 80 }]
 
 /* ============================================================================
@@ -61,7 +60,7 @@ const UPG: Record<UpgKey, UpgradeDef> = {
   cadencia:   { name: 'Cadencia',     base: 40,  growth: 1.14, color: '#34d399' },
   mira:       { name: 'Mira amplia',  base: 80,  growth: 1.17, color: '#a78bfa' },
   iman:       { name: 'Imán',         base: 30,  growth: 1.10, color: '#f472b6' },
-  recolector: { name: 'Recolector',   base: 500, growth: 1.20, color: '#f87171' },
+  recolector: { name: 'Delantero bot', base: 500, growth: 1.20, color: '#f87171' },
 }
 const UPG_ORDER: UpgKey[] = ['potencia', 'rosca', 'botas', 'cadencia', 'mira', 'iman', 'recolector']
 
@@ -73,7 +72,8 @@ const cooldownMs = (l: Levels) => Math.max(COOLDOWN_FLOOR, Math.round(COOLDOWN_M
 const miraPct = (l: Levels) => Math.min(60, l.mira * 6)         // cap +60%
 const zoneScale = (l: Levels) => 1 + miraPct(l) / 100
 const magnetR = (l: Levels) => MAGNET_BASE + l.iman * MAGNET_STEP
-const botR = (l: Levels) => BOT_R_BASE + Math.max(0, l.recolector - 1) * BOT_R_STEP
+const botFireMs = (l: Levels) =>
+  Math.max(BOT_FIRE_FLOOR, Math.round(BOT_FIRE_BASE * BOT_FIRE_DECAY ** Math.max(0, l.recolector - 1)))
 
 // lee los niveles tipados desde el store (mejoras futuras toleradas con ?? 0)
 const readLevels = (raw: Record<string, number>): Levels => {
@@ -161,8 +161,10 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   const nugSysRef = useRef<NuggetSystem | null>(null)
   if (!nugSysRef.current) nugSysRef.current = createNuggetSystem()
   const mouseRef = useRef({ x: 0, y: 0, inside: false })
-  const botRef = useRef<Bot>(createBot(200, 300))
-  const lastManualShotRef = useRef(0)
+  // bot delantero: balón y reloj propios — nunca toca el cooldown del jugador
+  const botBallRef = useRef<HTMLDivElement>(null)
+  const botFlightRef = useRef({ active: false, start: 0, toX: 0, toY: 0 })
+  const botNextShotRef = useRef(0)
   const autoSideRef = useRef(false)
   const cssWRef = useRef(760)
   const cssHRef = useRef(475)
@@ -173,7 +175,6 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   const effZonesRef = useRef<Zone[]>(ZONES)
 
   const resolveRef = useRef<(tx: number, ty: number) => void>(() => {})
-  const shootAtRef = useRef<(tx: number, ty: number, manual: boolean) => void>(() => {})
 
   // --- estado React (baja frecuencia) ---
   const [goldUi, setGoldUi] = useState(P.gold)
@@ -296,9 +297,14 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
     P.total += absorbed
   }
 
-  // --- disparar a un objetivo concreto (manual = mira; auto = raso seguro) ---
-  const shootAt = useCallback((tx: number, ty: number, manual: boolean) => {
+  // --- disparo del jugador (el bot tiene su propio balón y no pasa por aquí) ---
+  const shootAt = useCallback((tx: number, ty: number) => {
     if (cooldownRef.current) return
+    // Con Cadencia al suelo (250ms) el CD es MENOR que el vuelo (350ms): un tiro nuevo
+    // pisaría al anterior en el aire y este jamás resolvería (ni gol ni fallo). El
+    // resultado se decide al disparar, así que el tiro en vuelo aterriza YA.
+    const prev = flightRef.current
+    if (prev.active) { prev.active = false; resolveRef.current(prev.toX, prev.toY) }
     // la estela toma el color de la zona destino (dorada en escuadra, gris si va fuera/parada)
     const zones = ZONES.map((z) => scaleZone(z, zoneScale(levelsRef.current)))
     const res = resolveTarget(tx, ty, zones)
@@ -319,17 +325,11 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
     setCdMs(cd)
     setCdKey((k) => k + 1)
     window.setTimeout(() => { cooldownRef.current = false; setCooldown(false) }, cd)
-    if (manual) lastManualShotRef.current = performance.now()
   }, [])
-  shootAtRef.current = shootAt
 
   const shoot = useCallback(() => {
-    // Registrar la INTENCIÓN manual aunque el cooldown descarte este tiro: sin esto,
-    // el bot dispara en el mismo frame en que expira el CD y monopoliza el cañón
-    // (el jugador nunca consigue colar un tiro manual — inanición).
-    lastManualShotRef.current = performance.now()
     const p = posRef.current
-    shootAt(p.x, p.y, true) // captura la posición de la mira
+    shootAt(p.x, p.y) // captura la posición de la mira
   }, [shootAt])
 
   // ESPACIO para disparar
@@ -469,31 +469,40 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
         const sys = nugSysRef.current!
         const mr = magnetR(l)
         const botActive = l.recolector >= 1
-        const bR = botR(l)
         const m = mouseRef.current
-        const b = botRef.current
 
-        /* ---- bot recolector: persigue el nugget más cercano / deambula ---- */
-        if (botActive) stepBot(b, sys.list, aw, ah, bR)
-
-        /* ---- física + recogida de nuggets (imán del ratón > bot) ---- */
-        const absorbed = sys.step(
-          aw, ah,
-          m.inside ? { x: m.x, y: m.y, r: mr } : null,
-          botActive ? { x: b.x, y: b.y, r: bR } : null,
-        )
+        /* ---- física + recogida de nuggets (el imán del ratón es el ÚNICO recolector) ---- */
+        const absorbed = sys.step(aw, ah, m.inside ? { x: m.x, y: m.y, r: mr } : null)
         if (absorbed > 0) { P.gold += absorbed; P.total += absorbed }
 
-        /* ---- dibujar nuggets / bot / radio del imán ---- */
+        /* ---- dibujar nuggets / radio del imán ---- */
         sys.draw(ctx)
-        if (botActive) drawBot(ctx, b, bR, time)
         if (m.inside) drawMagnetRing(ctx, m.x, m.y, mr)
 
-        /* ---- auto-tiro idle del recolector (raso seguro alterno) ---- */
-        if (botActive && !cooldownRef.current && time - lastManualShotRef.current > AUTO_IDLE_DELAY) {
-          autoSideRef.current = !autoSideRef.current
-          const t = RASO_SAFE[autoSideRef.current ? 0 : 1]
-          shootAtRef.current(t.x, t.y, false)
+        /* ---- delantero bot: balón y reloj PROPIOS, independiente del jugador ---- */
+        if (botActive) {
+          const bf = botFlightRef.current
+          if (!bf.active && time >= botNextShotRef.current) {
+            autoSideRef.current = !autoSideRef.current
+            const t = RASO_SAFE[autoSideRef.current ? 0 : 1]
+            bf.active = true; bf.start = 0; bf.toX = t.x; bf.toY = t.y
+            botNextShotRef.current = time + botFireMs(l)
+          }
+          const botBall = botBallRef.current
+          if (bf.active && botBall) {
+            if (bf.start === 0) bf.start = time
+            const t = Math.min(1, (time - bf.start) / BOT_FLIGHT_MS)
+            const cx = lerp(BOT_X, bf.toX, t)
+            const cy = lerp(FOOT_Y, bf.toY, t) - Math.sin(t * Math.PI) * 14
+            const scale = lerp(1.1, 0.5, t)
+            botBall.style.transform = `translate(${(cx / 100) * aw - BALL_R}px, ${(cy / 100) * ah - BALL_R}px) scale(${scale}) rotate(${t * 540}deg)`
+            botBall.style.opacity = '1'
+            if (t >= 1) {
+              bf.active = false
+              botBall.style.opacity = '0'
+              resolveRef.current(bf.toX, bf.toY)  // raso seguro → siempre gol ×1
+            }
+          }
         }
 
         /* ---- tick animado del contador de oro ---- */
@@ -606,6 +615,14 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
           {/* balón estático en el pie (chuta con element.animate) */}
           <div ref={footBallRef} className="ball foot-ball" />
 
+          {/* delantero bot: avatar + su propio balón */}
+          {levels.recolector >= 1 && (
+            <>
+              <div className="bot-avatar" style={{ left: `${BOT_X}%` }}>🤖</div>
+              <div ref={botBallRef} className="ball" style={{ width: BALL_R * 2, height: BALL_R * 2, opacity: 0 }} />
+            </>
+          )}
+
           {/* sombra de despegue del balón */}
           <div ref={ballShadowRef} className="ball-shadow" />
 
@@ -673,10 +690,11 @@ function upgradeDesc(key: UpgKey, l: Levels): { txt: string; maxed: boolean } {
       return { txt: `zonas +${cur}%${cur >= 60 ? ' (cap)' : ` → +${nxt}%`}`, maxed: cur >= 60 }
     }
     case 'iman':     return { txt: `radio ${magnetR(l)}px → ${magnetR(n('iman', l.iman + 1))}px`, maxed: false }
-    case 'recolector':
-      return l.recolector === 0
-        ? { txt: 'activa bot idle (auto-tira al raso + recoge)', maxed: false }
-        : { txt: `bot radio ${botR(l)}px → ${botR(n('recolector', l.recolector + 1))}px`, maxed: false }
+    case 'recolector': {
+      if (l.recolector === 0) return { txt: 'activa delantero bot (tira solo al raso ×1)', maxed: false }
+      const cur = botFireMs(l), nxt = botFireMs(n('recolector', l.recolector + 1))
+      return { txt: `tira cada ${cur}ms${cur <= BOT_FIRE_FLOOR ? ' (suelo)' : ` → ${nxt}ms`}`, maxed: cur <= BOT_FIRE_FLOOR }
+    }
   }
 }
 
@@ -790,6 +808,12 @@ const css = `
   left:50%; bottom:1.4%; width:20px; height:20px; margin-left:-10px; top:auto;
   opacity:1; box-shadow:0 0 12px #ffffff55, 0 2px 6px #0009;
 }
+.bot-avatar {
+  position:absolute; bottom:1%; transform:translateX(-50%); font-size:26px; pointer-events:none; z-index:6;
+  filter: drop-shadow(0 4px 6px #000a);
+  animation: bot-bob 1.6s ease-in-out infinite;
+}
+@keyframes bot-bob { 0%,100% { transform:translateX(-50%) translateY(0); } 50% { transform:translateX(-50%) translateY(-4px); } }
 .ripple {
   position:absolute; width:72px; height:72px; margin:-36px 0 0 -36px; border-radius:50%;
   border:2.5px solid currentColor; box-shadow:0 0 12px currentColor; pointer-events:none; z-index:9;
