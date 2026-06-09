@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { hot, useColdVersion, isUnlocked, unlockPhase, switchPhase, type PhaseId } from './core/store'
 import { initPersistence } from './core/save'
 import { GoalPhase } from './phases/porteria/GoalPhase'
+import { BasketPhase } from './phases/basket/BasketPhase'
 
 /* Monta SOLO la fase activa: garantiza un único bucle rAF vivo (el cleanup del
  * effect de cada fase cancela el suyo al desmontar). */
@@ -25,7 +26,7 @@ export function App() {
       </nav>
       {active === 'porteria'
         ? <GoalPhase onVictory={onVictory} victorySeen={basketUnlocked} />
-        : <BasketPlaceholder />}
+        : <BasketPhase />}
     </>
   )
 }
@@ -50,15 +51,6 @@ function PhaseTab(props: { id: PhaseId; label: string; active: PhaseId; unlocked
   )
 }
 
-function BasketPlaceholder() {
-  return (
-    <div style={styles.placeholder}>
-      <div style={{ fontSize: 40 }}>🏀</div>
-      <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: 2 }}>LA CANCHA · en construcción</div>
-    </div>
-  )
-}
-
 const styles: Record<string, React.CSSProperties> = {
   tabs: {
     position: 'fixed', top: 10, left: '50%', transform: 'translateX(-50%)', zIndex: 50,
@@ -67,10 +59,5 @@ const styles: Record<string, React.CSSProperties> = {
   tab: {
     padding: '6px 16px', borderRadius: 999, border: '1.5px solid', fontWeight: 800, fontSize: 12,
     letterSpacing: 1, font: 'inherit', transition: 'all .15s',
-  },
-  placeholder: {
-    minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-    gap: 12, background: 'radial-gradient(circle at 50% 0%, #3a2a1e 0%, #14100b 70%)',
-    color: '#e2e8f0', fontFamily: 'system-ui, -apple-system, Segoe UI, sans-serif', userSelect: 'none',
   },
 }
