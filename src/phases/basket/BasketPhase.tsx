@@ -97,6 +97,14 @@ const readLevels = (raw: Record<string, number>): Levels => {
   return l
 }
 
+/** [CORE.2] Tasa offline de la Mascota en oro/ms (0 sin mascota).
+ *  Mismo balance que el bucle vivo: tiro libre (nunca falla, sin swish) cada ftMs. */
+export const offlineRateBasket = (raw: Record<string, number>): number => {
+  const l = readLevels(raw)
+  if (l.mascota < 1) return 0
+  return Math.max(1, Math.round(tiroBase(l) * bonusCancha(l))) / ftMs(l)
+}
+
 const cost = (key: BKey, lv: number) => costOf(UPG[key], lv)
 
 /* ============================================================================

@@ -12,6 +12,7 @@ export type SaveV1 = {
   unlocked: PhaseId[]
   activePhase: PhaseId
   muted?: boolean
+  lastSeen?: number // Date.now() del último autosave — base del progreso offline [CORE.2]
   phases: Record<PhaseId, { gold: number; total: number; levels: Record<string, number>; goles: number; fallos: number }>
 }
 
@@ -32,12 +33,13 @@ function hydratePhase(target: PhaseHot, raw: unknown) {
   }
 }
 
-/** Hidrata store.hot desde localStorage. Llamar UNA vez, antes del primer render. */
-export function loadSave(): void {
+/** Hidrata store.hot desde localStorage. Llamar UNA vez, antes del primer render.
+ *  Devuelve el `lastSeen` del save (o null si no hay) para el progreso offline [CORE.2]. */
+export function loadSave(): number | null {
   let raw: string | null = null
   try {
     raw = localStorage.getItem(SAVE_KEY)
-    if (!raw) return
+    if (!raw) return null
     const data = JSON.parse(raw) as Partial<SaveV1>
     if (data.schemaVersion !== 1) throw new Error(`schemaVersion desconocida: ${data.schemaVersion}`)
 
@@ -52,12 +54,14 @@ export function loadSave(): void {
       hot.activePhase = data.activePhase
     }
     if (typeof data.muted === 'boolean') hot.muted = data.muted
+    return isNum(data.lastSeen) && data.lastSeen > 0 ? data.lastSeen : null
   } catch (err) {
     console.warn('[save] save corrupto — respaldado y reseteado:', err)
     try {
       if (raw) localStorage.setItem(CORRUPT_KEY, raw)
       localStorage.removeItem(SAVE_KEY)
     } catch { /* storage lleno/bloqueado: seguimos con el estado por defecto */ }
+    return null
   }
 }
 
@@ -67,6 +71,7 @@ export function writeSave(): void {
     unlocked: hot.unlocked,
     activePhase: hot.activePhase,
     muted: hot.muted,
+    lastSeen: Date.now(),
     phases: hot.phases,
   }
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)) } catch { /* storage no disponible */ }

@@ -1,6 +1,8 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { hot, useColdVersion, isUnlocked, unlockPhase, switchPhase, commit, type PhaseId } from './core/store'
 import { initPersistence } from './core/save'
+import { getOfflineGain, formatAway } from './core/offline'
+import { formatNum } from './core/utils'
 import { unlockAudio } from './core/audio'
 import { GoalPhase } from './phases/porteria/GoalPhase'
 import { BasketPhase } from './phases/basket/BasketPhase'
@@ -22,6 +24,11 @@ export function App() {
       window.removeEventListener('keydown', unlock)
     }
   }, [])
+  // [CORE.2] banner "Mientras no estabas": el oro ya está acreditado en main.tsx;
+  // aquí solo se muestra una vez por sesión (estado local = descartable)
+  const [offlineSeen, setOfflineSeen] = useState(false)
+  const offline = getOfflineGain()
+
   const active = hot.activePhase
   const basketUnlocked = isUnlocked('basket')
 
@@ -43,6 +50,20 @@ export function App() {
           {hot.muted ? '🔇' : '🔊'}
         </button>
       </nav>
+      {offline && !offlineSeen && (
+        <div style={styles.offlineBanner}>
+          <span>
+            💤 Mientras no estabas ({formatAway(offline.awayMs)}):{' '}
+            <b style={{ color: '#fbbf24' }}>+{formatNum(offline.total)} oro</b>
+            {offline.byPhase.length > 1 && (
+              <span style={{ color: '#94a3b8' }}>
+                {' '}({offline.byPhase.map((g) => `${PHASE_EMOJI[g.phase]} +${formatNum(g.gold)}`).join(' · ')})
+              </span>
+            )}
+          </span>
+          <button style={styles.offlineOk} onClick={() => setOfflineSeen(true)}>OK</button>
+        </div>
+      )}
       {active === 'porteria'
         ? <GoalPhase onVictory={onVictory} victorySeen={basketUnlocked} />
         : <BasketPhase />}
@@ -70,6 +91,8 @@ function PhaseTab(props: { id: PhaseId; label: string; active: PhaseId; unlocked
   )
 }
 
+const PHASE_EMOJI: Record<PhaseId, string> = { porteria: '⚽', basket: '🏀' }
+
 const styles: Record<string, React.CSSProperties> = {
   tabs: {
     position: 'fixed', top: 10, left: '50%', transform: 'translateX(-50%)', zIndex: 50,
@@ -78,5 +101,15 @@ const styles: Record<string, React.CSSProperties> = {
   tab: {
     padding: '6px 16px', borderRadius: 999, border: '1.5px solid', fontWeight: 800, fontSize: 12,
     letterSpacing: 1, font: 'inherit', transition: 'all .15s',
+  },
+  offlineBanner: {
+    position: 'fixed', top: 52, left: '50%', transform: 'translateX(-50%)', zIndex: 50,
+    display: 'flex', alignItems: 'center', gap: 12, padding: '8px 16px', borderRadius: 10,
+    border: '1.5px solid #fbbf24', background: '#0c1512f2', color: '#e2e8f0', fontSize: 13,
+    boxShadow: '0 6px 24px #000a, 0 0 14px #fbbf2433', whiteSpace: 'nowrap',
+  },
+  offlineOk: {
+    padding: '3px 12px', borderRadius: 999, border: '1.5px solid #fbbf24', background: 'transparent',
+    color: '#fbbf24', fontWeight: 800, fontSize: 12, cursor: 'pointer', font: 'inherit',
   },
 }

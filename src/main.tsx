@@ -2,8 +2,10 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { App } from './App'
 import { loadSave } from './core/save'
+import { applyOfflineProgress } from './core/offline'
 
-loadSave() // hidrata el store ANTES del primer render
+// hidrata el store y acredita el idle offline de los bots ANTES del primer render
+applyOfflineProgress(loadSave())
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

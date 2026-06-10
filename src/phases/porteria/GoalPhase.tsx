@@ -83,6 +83,14 @@ const readLevels = (raw: Record<string, number>): Levels => {
   return l
 }
 
+/** [CORE.2] Tasa offline del Delantero bot en oro/ms (0 sin bot).
+ *  Mismo balance que el bucle vivo: tira al raso seguro (×1) cada botFireMs. */
+export const offlineRatePorteria = (raw: Record<string, number>): number => {
+  const l = readLevels(raw)
+  if (l.recolector < 1) return 0
+  return Math.max(1, Math.round(oroBase(l) * bonusGlobal(l))) / botFireMs(l)
+}
+
 /* ============================================================================
  * ZONAS (rectángulos en % del área) + PORTERO
  * ========================================================================== */
