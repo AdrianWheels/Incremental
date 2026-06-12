@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { rand, lerp, inRect, formatNum } from '../../core/utils'
-import { costOf, type UpgradeDef } from '../../core/economy'
 import { createNuggetSystem, drawMagnetRing, type NuggetSystem } from '../../core/nuggets'
-import { hot, useColdVersion, buyUpgrade } from '../../core/store'
+import { hot, useColdVersion } from '../../core/store'
+import { SALA_COST, type StarDef } from '../../core/galaxy'
 import { sfx } from '../../core/audio'
 import { probeNuggets } from '../../debug/probe'
 import { Hud } from '../../ui/Hud'
-import { UpgradePanel, type UpgRow } from '../../ui/UpgradePanel'
+import { GalaxyShop } from '../../ui/GalaxyShop'
+import {
+  GALAXY_PORTERIA, SALA2_ID, readLevels,
+  oroBase, bonusGlobal, escuadraMult, cooldownMs, zoneScale, magnetR, botFireMs,
+  type Levels,
+} from './galaxy'
 
 /* ============================================================================
  * DIALES DE BALANCE  ─ tocar aquí para iterar el feel rápido
@@ -26,71 +31,15 @@ const BALL_SCALE_END = 0.5
 const FOOT_X = 50          // punto de lanzamiento (% ancho) ── "el pie"
 const FOOT_Y = 99
 
-// Cooldown (base; lo recorta la mejora Cadencia) -----------------------------
-const COOLDOWN_MS = 700
-const COOLDOWN_FLOOR = 250  // suelo duro del CD
-
-// Economía / meta ------------------------------------------------------------
-export const META_GOLD = 100_000   // oro acumulado para "batir al portero"
+// Cooldown / mejoras: selectores y constelación en ./galaxy.ts [GLX.1]
 
 // Nuggets: física y recogida → diales compartidos en core/nuggets.ts (DEFAULT_NUGGET_CFG)
 
-// Nuggets: recogida (imán) --------------------------------------------------
-const MAGNET_BASE = 34      // radio de imán del ratón (px) ── pequeño al inicio
-const MAGNET_STEP = 20      // +radio por nivel de Imán
-
 // Delantero bot (tira con su PROPIO balón, independiente del jugador; NO recoge) --
 const BOT_X = 10            // posición del bot (% ancho, junto al poste izquierdo)
-const BOT_FIRE_BASE = 1800  // ms entre tiros del bot a nivel 1
-const BOT_FIRE_DECAY = 0.9  // cada nivel extra del bot recorta la cadencia ×0.9
-const BOT_FIRE_FLOOR = 600  // suelo duro de la cadencia del bot
 const BOT_FLIGHT_MS = 420   // vuelo del balón del bot
 // Extremos seguros del raso (×1, esquivan al portero) para el tiro del bot
 const RASO_SAFE = [{ x: 18, y: 80 }, { x: 82, y: 80 }]
-
-/* ============================================================================
- * MEJORAS  (todas las constantes de balance aquí)
- * ========================================================================== */
-
-type UpgKey = 'potencia' | 'rosca' | 'botas' | 'cadencia' | 'mira' | 'iman' | 'recolector'
-type Levels = Record<UpgKey, number>
-
-const UPG: Record<UpgKey, UpgradeDef> = {
-  potencia:   { name: 'Potencia',     base: 10,  growth: 1.12, color: '#60a5fa' },
-  rosca:      { name: 'Rosca',        base: 60,  growth: 1.18, color: '#ffd23f' },
-  botas:      { name: 'Botas de oro', base: 200, growth: 1.23, color: '#fbbf24' },
-  cadencia:   { name: 'Cadencia',     base: 40,  growth: 1.14, color: '#34d399' },
-  mira:       { name: 'Mira amplia',  base: 80,  growth: 1.17, color: '#a78bfa' },
-  iman:       { name: 'Imán',         base: 30,  growth: 1.10, color: '#f472b6' },
-  recolector: { name: 'Delantero bot', base: 500, growth: 1.20, color: '#f87171' },
-}
-const UPG_ORDER: UpgKey[] = ['potencia', 'rosca', 'botas', 'cadencia', 'mira', 'iman', 'recolector']
-
-// --- selectores derivados (funciones puras de los niveles) ---
-const oroBase = (l: Levels) => 1 + l.potencia
-const bonusGlobal = (l: Levels) => 1 + l.botas * 0.25
-const escuadraMult = (l: Levels) => 4 + l.rosca * 2
-const cooldownMs = (l: Levels) => Math.max(COOLDOWN_FLOOR, Math.round(COOLDOWN_MS * 0.92 ** l.cadencia))
-const miraPct = (l: Levels) => Math.min(60, l.mira * 6)         // cap +60%
-const zoneScale = (l: Levels) => 1 + miraPct(l) / 100
-const magnetR = (l: Levels) => MAGNET_BASE + l.iman * MAGNET_STEP
-const botFireMs = (l: Levels) =>
-  Math.max(BOT_FIRE_FLOOR, Math.round(BOT_FIRE_BASE * BOT_FIRE_DECAY ** Math.max(0, l.recolector - 1)))
-
-// lee los niveles tipados desde el store (mejoras futuras toleradas con ?? 0)
-const readLevels = (raw: Record<string, number>): Levels => {
-  const l = {} as Levels
-  for (const k of UPG_ORDER) l[k] = raw[k] ?? 0
-  return l
-}
-
-/** [CORE.2] Tasa offline del Delantero bot en oro/ms (0 sin bot).
- *  Mismo balance que el bucle vivo: tira al raso seguro (×1) cada botFireMs. */
-export const offlineRatePorteria = (raw: Record<string, number>): number => {
-  const l = readLevels(raw)
-  if (l.recolector < 1) return 0
-  return Math.max(1, Math.round(oroBase(l) * bonusGlobal(l))) / botFireMs(l)
-}
 
 /* ============================================================================
  * ZONAS (rectángulos en % del área) + PORTERO
@@ -189,17 +138,17 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
 
   // --- estado React (baja frecuencia) ---
   const [goldUi, setGoldUi] = useState(P.gold)
-  const [totalUi, setTotalUi] = useState(P.total)
   const [goles, setGoles] = useState(P.goles)
   const [fallos, setFallos] = useState(P.fallos)
   const [cooldown, setCooldown] = useState(false)
   const [cdKey, setCdKey] = useState(0)
-  const [cdMs, setCdMs] = useState(COOLDOWN_MS)
+  const [cdMs, setCdMs] = useState(700)
   const [floaters, setFloaters] = useState<Floater[]>([])
   const [ripples, setRipples] = useState<Ripple[]>([])
-  const [victory, setVictory] = useState(false)
-  const victoryJingleRef = useRef(false)
-  const victorySeenRef = useRef(props.victorySeen ?? false)
+  // [GLX.1] tienda-galaxia (mientras está abierta el juego sigue vivo debajo)
+  const [shopOpen, setShopOpen] = useState(false)
+  const shopOpenRef = useRef(false)
+  shopOpenRef.current = shopOpen
   const floaterId = useRef(0)
 
   const pushRipple = (x: number, y: number, color: string) => {
@@ -315,6 +264,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
 
   // --- disparo del jugador (el bot tiene su propio balón y no pasa por aquí) ---
   const shootAt = useCallback((tx: number, ty: number) => {
+    if (shopOpenRef.current) return // comprando en la galaxia: el ESPACIO no chuta
     if (cooldownRef.current) return
     // Con Cadencia al suelo (250ms) el CD es MENOR que el vuelo (350ms): un tiro nuevo
     // pisaría al anterior en el aire y este jamás resolvería (ni gol ni fallo). El
@@ -356,18 +306,12 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
     return () => window.removeEventListener('keydown', onKey)
   }, [shoot])
 
-  // --- throttle: refresca la UI (panel/meta) sin tocar el bucle de 60fps ---
+  // --- throttle: refresca la UI (HUD/tienda) sin tocar el bucle de 60fps ---
   useEffect(() => {
     const id = window.setInterval(() => {
       setGoldUi(P.gold)
-      setTotalUi(P.total)
       setGoles(P.goles)
       setFallos(P.fallos)
-      if (P.total >= META_GOLD && !victoryJingleRef.current) {
-        victoryJingleRef.current = true
-        setVictory(true)
-        if (!victorySeenRef.current) sfx.victory()
-      }
     }, 120)
     return () => window.clearInterval(id)
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
@@ -544,29 +488,37 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   }
   const onMouseLeave = () => { mouseRef.current.inside = false }
 
-  // --- comprar mejora (el store lee de hot → robusto ante clics síncronos rápidos) ---
-  const onBuy = (key: string) => {
-    if (buyUpgrade('porteria', key, UPG[key as UpgKey])) { setGoldUi(P.gold); sfx.buy() }
+  // --- compra en la galaxia: la ⭐ de Sala gana la zona y viaja [GLX.1] ---
+  const onStarBought = (star: StarDef) => {
+    setGoldUi(P.gold)
+    if (star.id === SALA2_ID) {
+      sfx.victory()
+      setShopOpen(false)
+      props.onVictory?.()
+    }
+  }
+  const openShop = () => {
+    mouseRef.current.inside = false // el imán no se queda enganchado bajo el overlay
+    setShopOpen(true)
   }
 
   const effZones = ZONES.map((z) => scaleZone(z, zoneScale(levels)))
   effZonesRef.current = effZones // espejo para el bucle (color de la mira) sin alocar por frame
 
-  const upgRows: UpgRow[] = UPG_ORDER.map((key) => {
-    const { txt, maxed } = upgradeDesc(key, levels)
-    return { key, def: UPG[key], lv: levels[key], cost: cost(key, levels[key]), desc: txt, maxed }
-  })
+  const salaBought = (P.levels[SALA2_ID] ?? 0) >= 1
 
   return (
     <div style={styles.page}>
       <style>{css}</style>
 
-      {/* ---- HUD: oro + meta ---- */}
+      {/* ---- HUD: oro + ahorro hacia la ⭐ + botón de la galaxia ---- */}
       <Hud
         goldElRef={goldElRef}
-        metaLabel={props.victorySeen ? '✓ portero batido' : 'Batir al portero'}
-        totalUi={totalUi}
-        metaGold={META_GOLD}
+        metaLabel={salaBought ? '✓ sala 2 desbloqueada' : '⭐ SALA 2 (oro gastable)'}
+        totalUi={salaBought ? SALA_COST : goldUi}
+        metaGold={SALA_COST}
+        onShop={openShop}
+        shopColor="#4ade80"
         tally={[
           { label: `${goles} goles`, color: '#4ade80' },
           { label: `${fallos} fallos`, color: '#ef4444' },
@@ -668,55 +620,25 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
           {floaters.map((fl) => (
             <div key={fl.id} className="floater" style={{ left: `${fl.x}%`, top: `${fl.y}%`, color: fl.color }}>{fl.label}</div>
           ))}
-
-          {/* banner de victoria (solo la primera vez) */}
-          {victory && !props.victorySeen && (
-            <div style={styles.victory}>
-              <div style={styles.victoryTitle}>¡PORTERO BATIDO!</div>
-              <div style={styles.victorySub}>{formatNum(P.total)} de oro acumulado</div>
-              <button style={styles.sala2} onClick={props.onVictory}>SALA 2 · ¡A LA CANCHA! 🏀</button>
-            </div>
-          )}
         </div>
-
-        {/* ---- PANEL DE MEJORAS ---- */}
-        <UpgradePanel rows={upgRows} gold={goldUi} onBuy={onBuy} />
       </div>
+
+      {/* ---- TIENDA-GALAXIA (overlay; el campo sigue vivo debajo) ---- */}
+      <GalaxyShop
+        def={GALAXY_PORTERIA}
+        phase="porteria"
+        gold={goldUi}
+        open={shopOpen}
+        onClose={() => setShopOpen(false)}
+        onBought={onStarBought}
+      />
 
       <p style={styles.hint}>
         Clic / <kbd style={styles.kbd}>ESPACIO</kbd> para chutar · barre los <b style={{ color: '#fbbf24' }}>nuggets</b> con el ratón ·
-        la <b style={{ color: '#ffd23f' }}>escuadra</b> da el oro gordo
+        compra mejoras en la <b style={{ color: '#4ade80' }}>🌌 galaxia</b> · la ⭐ de 1M gana la zona
       </p>
     </div>
   )
-}
-
-const cost = (key: UpgKey, lv: number) => costOf(UPG[key], lv)
-
-/* ============================================================================
- * Texto de efecto de cada mejora (current → next) + flag de tope
- * ========================================================================== */
-function upgradeDesc(key: UpgKey, l: Levels): { txt: string; maxed: boolean } {
-  const n = (k: keyof Levels, v: number) => ({ ...l, [k]: v }) as Levels
-  switch (key) {
-    case 'potencia': return { txt: `oro base ${oroBase(l)} → ${oroBase(n('potencia', l.potencia + 1))}`, maxed: false }
-    case 'rosca':    return { txt: `escuadra ×${escuadraMult(l)} → ×${escuadraMult(n('rosca', l.rosca + 1))}`, maxed: false }
-    case 'botas':    return { txt: `global +${l.botas * 25}% → +${(l.botas + 1) * 25}%`, maxed: false }
-    case 'cadencia': {
-      const cur = cooldownMs(l), nxt = cooldownMs(n('cadencia', l.cadencia + 1))
-      return { txt: `CD ${cur}ms${cur <= COOLDOWN_FLOOR ? ' (suelo)' : ` → ${nxt}ms`}`, maxed: cur <= COOLDOWN_FLOOR }
-    }
-    case 'mira': {
-      const cur = miraPct(l), nxt = miraPct(n('mira', l.mira + 1))
-      return { txt: `zonas +${cur}%${cur >= 60 ? ' (cap)' : ` → +${nxt}%`}`, maxed: cur >= 60 }
-    }
-    case 'iman':     return { txt: `radio ${magnetR(l)}px → ${magnetR(n('iman', l.iman + 1))}px`, maxed: false }
-    case 'recolector': {
-      if (l.recolector === 0) return { txt: 'activa delantero bot (tira solo al raso ×1)', maxed: false }
-      const cur = botFireMs(l), nxt = botFireMs(n('recolector', l.recolector + 1))
-      return { txt: `tira cada ${cur}ms${cur <= BOT_FIRE_FLOOR ? ' (suelo)' : ` → ${nxt}ms`}`, maxed: cur <= BOT_FIRE_FLOOR }
-    }
-  }
 }
 
 /* Rebote: invierte componente, jitter al ángulo, renormaliza a SPEED, fuerza signo. */
@@ -746,16 +668,6 @@ const styles: Record<string, React.CSSProperties> = {
   },
   hint: { fontSize: 13, color: '#64748b', margin: 0, textAlign: 'center' },
   kbd: { background: '#1e293b', border: '1px solid #475569', borderRadius: 4, padding: '1px 6px', fontSize: 12, color: '#cbd5e1' },
-  victory: {
-    position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-    gap: 12, background: 'radial-gradient(circle, #0a1510dd, #000d)', backdropFilter: 'blur(2px)', zIndex: 20,
-  },
-  victoryTitle: { fontSize: 32, fontWeight: 900, color: '#fbbf24', letterSpacing: 2, textShadow: '0 0 20px #fbbf2466' },
-  victorySub: { fontSize: 14, color: '#cbd5e1' },
-  sala2: {
-    marginTop: 8, padding: '10px 20px', borderRadius: 8, border: '1px solid #fbbf24', background: '#1e293b',
-    color: '#fbbf24', fontWeight: 700, cursor: 'pointer', font: 'inherit', fontSize: 15,
-  },
 }
 
 const css = `

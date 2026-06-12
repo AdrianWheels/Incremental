@@ -11,6 +11,9 @@ export function Hud(props: {
   totalUi: number
   metaGold: number
   tally: TallyItem[]
+  /** [GLX.1] abre la tienda-galaxia; el color identifica la fase */
+  onShop?: () => void
+  shopColor?: string
 }) {
   const progress = Math.min(100, (props.totalUi / props.metaGold) * 100)
   return (
@@ -19,6 +22,15 @@ export function Hud(props: {
         <span style={styles.goldIcon}>●</span>
         <span ref={props.goldElRef} style={styles.goldNum}>0</span>
         <span style={styles.goldLbl}>ORO</span>
+        {props.onShop && (
+          <button
+            onClick={props.onShop}
+            style={{ ...styles.shopBtn, borderColor: props.shopColor ?? '#94a3b8', color: props.shopColor ?? '#94a3b8' }}
+            title="abrir la galaxia de mejoras"
+          >
+            🌌 GALAXIA
+          </button>
+        )}
       </div>
       <div style={styles.metaWrap}>
         <div style={styles.metaTop}>
@@ -47,4 +59,8 @@ const styles: Record<string, React.CSSProperties> = {
   metaBar: { height: 10, background: '#0f1f18', borderRadius: 6, overflow: 'hidden', border: '1px solid #1e3a2f' },
   metaFill: { height: '100%', background: 'linear-gradient(90deg,#4ade80,#fbbf24)', transition: 'width 0.2s ease', borderRadius: 6 },
   tally: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', fontSize: 12, fontWeight: 700, gap: 2 },
+  shopBtn: {
+    font: 'inherit', fontSize: 12, fontWeight: 800, letterSpacing: 1, marginLeft: 14, alignSelf: 'center',
+    padding: '6px 14px', borderRadius: 999, border: '1.5px solid', background: '#0c1512cc', cursor: 'pointer',
+  },
 }

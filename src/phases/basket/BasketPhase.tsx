@@ -1,12 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import { rand, lerp, formatNum } from '../../core/utils'
-import { costOf, type UpgradeDef } from '../../core/economy'
 import { createNuggetSystem, drawMagnetRing, type NuggetSystem } from '../../core/nuggets'
-import { hot, useColdVersion, buyUpgrade } from '../../core/store'
+import { hot, useColdVersion } from '../../core/store'
+import { SALA_COST, type StarDef } from '../../core/galaxy'
 import { sfx } from '../../core/audio'
 import { probeNuggets } from '../../debug/probe'
 import { Hud } from '../../ui/Hud'
-import { UpgradePanel, type UpgRow } from '../../ui/UpgradePanel'
+import { GalaxyShop } from '../../ui/GalaxyShop'
+import {
+  GALAXY_BASKET, SALA3_ID, readLevels,
+  tiroBase, sweetFactor, tripleMult, comboStep, comboCap, fintaDodge, bonusCancha, magnetR, ftMs,
+  type Levels,
+} from './galaxy'
 
 /* ============================================================================
  * DIALES DE BALANCE  ─ tocar aquí para iterar el feel rápido
@@ -37,15 +42,10 @@ const DEF_W = 7, DEF_H = 24       // tamaño del defensor (%)
 
 // Mascota (bot con balón PROPIO: tiros libres independientes del jugador; NO recoge) --
 const FT_X = 58                   // posición del tiro libre
-const FT_BASE_MS = 2000           // ms entre tiros libres a nivel 1
-const FT_DECAY = 0.9              // cada nivel extra recorta la cadencia ×0.9
-const FT_FLOOR_MS = 700           // suelo duro de la cadencia
 const FT_FLIGHT_MS = 420          // vuelo del tiro libre
-const MAGNET_BASE = 34
-const MAGNET_STEP = 20
+// cadencia/imán → selectores y constelación en ./galaxy.ts [GLX.1]
 
-// Economía / meta --------------------------------------------------------------
-export const META_GOLD_BASKET = 250_000
+// Economía ----------------------------------------------------------------------
 const SWISH_MULT = 1.5            // bonus fijo del swish; el combo lo escala
 
 /* ============================================================================
@@ -61,52 +61,12 @@ const POS: Record<ShotPos, { x: number; flightMs: number; arcH: number; label: s
 const POS_ORDER: ShotPos[] = ['bandeja', 'media', 'triple']
 
 /* ============================================================================
- * MEJORAS  (árbol propio del baloncesto — economía soft-reset)
+ * MEJORAS → ./galaxy.ts (constelación + selectores) [GLX.1]
  * ========================================================================== */
 
-type BKey = 'tiro' | 'muneca' | 'triple' | 'combo' | 'finta' | 'zapas' | 'iman' | 'mascota'
-type Levels = Record<BKey, number>
-
-const UPG: Record<BKey, UpgradeDef> = {
-  tiro:    { name: 'Tiro potente', base: 10,  growth: 1.12, color: '#60a5fa' },
-  muneca:  { name: 'Muñeca',       base: 40,  growth: 1.14, color: '#34d399' },
-  triple:  { name: 'Triple letal', base: 80,  growth: 1.18, color: '#ffd23f' },
-  combo:   { name: 'En racha',     base: 150, growth: 1.22, color: '#ff8c42' },
-  finta:   { name: 'Finta',        base: 60,  growth: 1.16, color: '#a78bfa' },
-  zapas:   { name: 'Zapas pro',    base: 250, growth: 1.23, color: '#fbbf24' },
-  iman:    { name: 'Imán',         base: 30,  growth: 1.10, color: '#f472b6' },
-  mascota: { name: 'Mascota',      base: 500, growth: 1.20, color: '#f87171' },
-}
-const UPG_ORDER: BKey[] = ['tiro', 'muneca', 'triple', 'combo', 'finta', 'zapas', 'iman', 'mascota']
-
-// --- selectores derivados (funciones puras de los niveles) ---
-const tiroBase = (l: Levels) => 1 + l.tiro
-const sweetWOf = (pos: ShotPos, l: Levels) => POS[pos].sweetW * Math.min(1.8, 1 + l.muneca * 0.10) // cap +80%
-const tripleMult = (l: Levels) => 3 + l.triple * 1.5
+// derivado de posición (necesita POS, por eso vive aquí y no en galaxy.ts)
+const sweetWOf = (pos: ShotPos, l: Levels) => POS[pos].sweetW * sweetFactor(l)
 const posMult = (pos: ShotPos, l: Levels) => pos === 'triple' ? tripleMult(l) : pos === 'media' ? 2 : 1
-const comboStep = (l: Levels) => l.combo > 0 ? 0.25 : 0      // +0.25× por swish consecutivo
-const comboCap = (l: Levels) => l.combo > 0 ? 1 + l.combo : 0 // máx swishes apilables
-const fintaDodge = (l: Levels) => Math.min(0.6, l.finta * 0.08) // cap 60% de tapones esquivados
-const bonusCancha = (l: Levels) => 1 + l.zapas * 0.25
-const magnetR = (l: Levels) => MAGNET_BASE + l.iman * MAGNET_STEP
-const ftMs = (l: Levels) =>
-  Math.max(FT_FLOOR_MS, Math.round(FT_BASE_MS * FT_DECAY ** Math.max(0, l.mascota - 1)))
-
-const readLevels = (raw: Record<string, number>): Levels => {
-  const l = {} as Levels
-  for (const k of UPG_ORDER) l[k] = raw[k] ?? 0
-  return l
-}
-
-/** [CORE.2] Tasa offline de la Mascota en oro/ms (0 sin mascota).
- *  Mismo balance que el bucle vivo: tiro libre (nunca falla, sin swish) cada ftMs. */
-export const offlineRateBasket = (raw: Record<string, number>): number => {
-  const l = readLevels(raw)
-  if (l.mascota < 1) return 0
-  return Math.max(1, Math.round(tiroBase(l) * bonusCancha(l))) / ftMs(l)
-}
-
-const cost = (key: BKey, lv: number) => costOf(UPG[key], lv)
 
 /* ============================================================================
  * Tipos internos
@@ -174,15 +134,16 @@ export function BasketPhase() {
 
   // --- estado React (baja frecuencia) ---
   const [goldUi, setGoldUi] = useState(P.gold)
-  const [totalUi, setTotalUi] = useState(P.total)
   const [canastas, setCanastas] = useState(P.goles)
   const [fallos, setFallos] = useState(P.fallos)
   const [comboUi, setComboUi] = useState(0)
   const [charging, setCharging] = useState(false)
   const [floaters, setFloaters] = useState<Floater[]>([])
-  const [victory, setVictory] = useState(false)
-  // el banner solo se arma si la meta NO estaba ya batida al entrar (no reaparece en cada visita)
-  const victoryArmedRef = useRef(P.total < META_GOLD_BASKET)
+  const [victory, setVictory] = useState(false) // se dispara al COMPRAR la ⭐ SALA 3 [GLX.1]
+  // [GLX.1] tienda-galaxia (mientras está abierta el juego sigue vivo debajo)
+  const [shopOpen, setShopOpen] = useState(false)
+  const shopOpenRef = useRef(false)
+  shopOpenRef.current = shopOpen
   const floaterId = useRef(0)
 
   const pushFloater = (x: number, y: number, label: string, color: string) => {
@@ -265,6 +226,7 @@ export function BasketPhase() {
   /* ---- hold-and-release (pointer + ESPACIO; release SIEMPRE en window) ---- */
   const startCharge = () => {
     const now = performance.now()
+    if (shopOpenRef.current) return // comprando en la galaxia: el ESPACIO no carga
     if (chargeRef.current.active || flightRef.current.active || rejectRef.current.active) return
     if (now < recoverUntilRef.current) return
     chargeRef.current = { active: true, phase: 0, value: 0, lastT: now }
@@ -313,15 +275,9 @@ export function BasketPhase() {
   useEffect(() => {
     const id = window.setInterval(() => {
       setGoldUi(P.gold)
-      setTotalUi(P.total)
       setCanastas(P.goles)
       setFallos(P.fallos)
       setComboUi(comboRef.current)
-      if (victoryArmedRef.current && P.total >= META_GOLD_BASKET) {
-        victoryArmedRef.current = false
-        setVictory(true)
-        sfx.victory()
-      }
     }, 120)
     return () => window.clearInterval(id)
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
@@ -503,14 +459,21 @@ export function BasketPhase() {
   }
   const onMouseLeave = () => { mouseRef.current.inside = false }
 
-  const onBuy = (key: string) => {
-    if (buyUpgrade('basket', key, UPG[key as BKey])) { setGoldUi(P.gold); sfx.buy() }
+  // --- compra en la galaxia: la ⭐ SALA 3 gana la partida [GLX.1] ---
+  const onStarBought = (star: StarDef) => {
+    setGoldUi(P.gold)
+    if (star.id === SALA3_ID) {
+      sfx.victory()
+      setShopOpen(false)
+      setVictory(true)
+    }
+  }
+  const openShop = () => {
+    mouseRef.current.inside = false // el imán no se queda enganchado bajo el overlay
+    setShopOpen(true)
   }
 
-  const upgRows: UpgRow[] = UPG_ORDER.map((key) => {
-    const { txt, maxed } = upgradeDesc(key, levels)
-    return { key, def: UPG[key], lv: levels[key], cost: cost(key, levels[key]), desc: txt, maxed }
-  })
+  const salaBought = (P.levels[SALA3_ID] ?? 0) >= 1
 
   // geometría de la barra (las franjas solo cambian al comprar Muñeca → render frío)
   const sw = sweetWOf(posKey, levels)
@@ -523,9 +486,11 @@ export function BasketPhase() {
 
       <Hud
         goldElRef={goldElRef}
-        metaLabel="Dominar la cancha"
-        totalUi={totalUi}
-        metaGold={META_GOLD_BASKET}
+        metaLabel={salaBought ? '✓ partida ganada' : '⭐ SALA 3 (oro gastable)'}
+        totalUi={salaBought ? SALA_COST : goldUi}
+        metaGold={SALA_COST}
+        onShop={openShop}
+        shopColor="#ff8c42"
         tally={[
           { label: `${canastas} canastas`, color: '#4ade80' },
           { label: `${fallos} fallos`, color: '#ef4444' },
@@ -616,60 +581,35 @@ export function BasketPhase() {
             <div key={fl.id} className="floater" style={{ left: `${fl.x}%`, top: `${fl.y}%`, color: fl.color }}>{fl.label}</div>
           ))}
 
-          {/* banner de victoria */}
+          {/* banner de victoria (al comprar la ⭐ SALA 3) */}
           {victory && (
             <div style={styles.victory}>
-              <div style={styles.victoryTitle}>¡CANCHA DOMINADA!</div>
-              <div style={styles.victorySub}>{formatNum(P.total)} de oro acumulado</div>
+              <div style={styles.victoryTitle}>¡PARTIDA GANADA!</div>
+              <div style={styles.victorySub}>has comprado la ⭐ SALA 3 — la cancha es tuya</div>
               <button style={styles.sala3} disabled>SALA 3 · próximamente</button>
               <button style={styles.keepPlaying} onClick={() => setVictory(false)}>seguir jugando</button>
             </div>
           )}
         </div>
-
-        {/* ---- PANEL DE MEJORAS ---- */}
-        <UpgradePanel rows={upgRows} gold={goldUi} onBuy={onBuy} />
       </div>
+
+      {/* ---- TIENDA-GALAXIA (overlay; la cancha sigue viva debajo) ---- */}
+      <GalaxyShop
+        def={GALAXY_BASKET}
+        phase="basket"
+        gold={goldUi}
+        open={shopOpen}
+        onClose={() => setShopOpen(false)}
+        onBought={onStarBought}
+      />
 
       <p style={styles.hint}>
         <b style={{ color: '#e2e8f0' }}>Mantén pulsado</b> (clic o <kbd style={styles.kbd}>ESPACIO</kbd>) y suelta en la
         franja <b style={{ color: '#ffd23f' }}>dorada</b> = SWISH · <kbd style={styles.kbd}>1</kbd>/<kbd style={styles.kbd}>2</kbd>/<kbd style={styles.kbd}>3</kbd> cambia
-        de posición · el <b style={{ color: '#ef4444' }}>defensor</b> tapona bandeja y media
+        de posición · compra mejoras en la <b style={{ color: '#ff8c42' }}>🌌 galaxia</b>
       </p>
     </div>
   )
-}
-
-/* ============================================================================
- * Texto de efecto de cada mejora (current → next) + flag de tope
- * ========================================================================== */
-function upgradeDesc(key: BKey, l: Levels): { txt: string; maxed: boolean } {
-  const n = (k: BKey, v: number) => ({ ...l, [k]: v }) as Levels
-  switch (key) {
-    case 'tiro':   return { txt: `oro base ${tiroBase(l)} → ${tiroBase(n('tiro', l.tiro + 1))}`, maxed: false }
-    case 'muneca': {
-      const cur = Math.round((Math.min(1.8, 1 + l.muneca * 0.10) - 1) * 100)
-      const nxt = Math.round((Math.min(1.8, 1 + (l.muneca + 1) * 0.10) - 1) * 100)
-      return { txt: `sweet spot +${cur}%${cur >= 80 ? ' (cap)' : ` → +${nxt}%`}`, maxed: cur >= 80 }
-    }
-    case 'triple': return { txt: `triple ×${tripleMult(l)} → ×${tripleMult(n('triple', l.triple + 1))}`, maxed: false }
-    case 'combo':
-      return l.combo === 0
-        ? { txt: 'activa racha: swishes seguidos +25% c/u', maxed: false }
-        : { txt: `racha máx ×${comboCap(l)} → ×${comboCap(n('combo', l.combo + 1))}`, maxed: false }
-    case 'finta': {
-      const cur = Math.round(fintaDodge(l) * 100)
-      const nxt = Math.round(fintaDodge(n('finta', l.finta + 1)) * 100)
-      return { txt: `esquiva tapones ${cur}%${cur >= 60 ? ' (cap)' : ` → ${nxt}%`}`, maxed: cur >= 60 }
-    }
-    case 'zapas':  return { txt: `global +${l.zapas * 25}% → +${(l.zapas + 1) * 25}%`, maxed: false }
-    case 'iman':   return { txt: `radio ${magnetR(l)}px → ${magnetR(n('iman', l.iman + 1))}px`, maxed: false }
-    case 'mascota': {
-      if (l.mascota === 0) return { txt: 'activa mascota (tiros libres automáticos)', maxed: false }
-      const cur = ftMs(l), nxt = ftMs(n('mascota', l.mascota + 1))
-      return { txt: `TL cada ${cur}ms${cur <= FT_FLOOR_MS ? ' (suelo)' : ` → ${nxt}ms`}`, maxed: cur <= FT_FLOOR_MS }
-    }
-  }
 }
 
 /* ============================================================================

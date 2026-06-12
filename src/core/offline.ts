@@ -1,11 +1,11 @@
 /* [CORE.2] Progreso offline real: al volver tras cerrar la pestaña se estima lo que el
  * bot de cada fase habría producido en la ausencia (Date.now() del último autosave vs ahora)
  * y se acredita con eficiencia <100% y un cap de horas.
- * Las tasas (oro/ms) son identidad de cada fase y viven en su *Phase.tsx. */
+ * Las tasas (oro/ms) son identidad de cada fase y viven en su galaxy.ts [GLX.1]. */
 
 import { hot, type PhaseId } from './store'
-import { offlineRatePorteria } from '../phases/porteria/GoalPhase'
-import { offlineRateBasket } from '../phases/basket/BasketPhase'
+import { offlineRatePorteria } from '../phases/porteria/galaxy'
+import { offlineRateBasket } from '../phases/basket/galaxy'
 
 /* ============================================================================
  * DIALES DE BALANCE

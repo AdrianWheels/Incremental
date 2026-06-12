@@ -18,9 +18,10 @@
 
 import { hot, type PhaseId } from '../core/store'
 import { formatNum } from '../core/utils'
+import { SALA_COST } from '../core/galaxy'
 import { probeNuggets } from './probe'
-import { META_GOLD, offlineRatePorteria } from '../phases/porteria/GoalPhase'
-import { META_GOLD_BASKET, offlineRateBasket } from '../phases/basket/BasketPhase'
+import { offlineRatePorteria, SALA2_ID } from '../phases/porteria/galaxy'
+import { offlineRateBasket, SALA3_ID } from '../phases/basket/galaxy'
 
 // Diales -----------------------------------------------------------------------
 const TICK_MS = 1000            // muestreo del sampler
@@ -29,7 +30,10 @@ const RECENT_WINDOW_MS = 60_000 // ventana del ritmo reciente (ETA)
 const LS_KEY = 'incremental.telemetry'
 
 const PHASE_IDS: PhaseId[] = ['porteria', 'basket']
-const META: Record<PhaseId, number> = { porteria: META_GOLD, basket: META_GOLD_BASKET }
+// [GLX.1] la "meta" pasa a ser COMPRAR la ⭐ de Sala (1M de oro gastable)
+const META: Record<PhaseId, number> = { porteria: SALA_COST, basket: SALA_COST }
+const SALA_ID: Record<PhaseId, string> = { porteria: SALA2_ID, basket: SALA3_ID }
+const salaBought = (id: PhaseId) => (hot.phases[id].levels[SALA_ID[id]] ?? 0) >= 1
 // tasa teórica del bot en oro/ms (mismas fórmulas que el bucle vivo / offline)
 const BOT_RATE: Record<PhaseId, (levels: Record<string, number>) => number> = {
   porteria: offlineRatePorteria,
@@ -110,9 +114,9 @@ export function initTelemetry(): void {
   for (const id of PHASE_IDS) {
     lastWealth[id] = wealthOf(id)
     const st = state.phases[id]
-    if (!st.goal && hot.phases[id].total >= META[id]) {
+    if (!st.goal && salaBought(id)) {
       st.goal = snapshotGoal(id, st, false)
-      console.warn(`[telemetry] meta de ${id} ya batida al iniciar — el tiempo-hasta-meta no es representativo (resetea el save para medir)`)
+      console.warn(`[telemetry] ⭐ de ${id} ya comprada al iniciar — el tiempo-hasta-meta no es representativo (resetea el save para medir)`)
     }
   }
 
@@ -225,9 +229,9 @@ export function initTelemetry(): void {
     ring.push({ t: now, w })
     while (ring.length > 0 && now - ring[0].t > RECENT_WINDOW_MS) ring.shift()
 
-    if (!st.goal && hot.phases[id].total >= META[id]) {
+    if (!st.goal && salaBought(id)) {
       st.goal = snapshotGoal(id, st, true)
-      console.log(`[telemetry] 🏁 META de ${id} en ${fmtDur(st.goal.totalMs)} (activo ${fmtDur(st.goal.activeMs)} / idle ${fmtDur(st.goal.idleMs)})`, exportData())
+      console.log(`[telemetry] 🏁 ⭐ de ${id} comprada en ${fmtDur(st.goal.totalMs)} (activo ${fmtDur(st.goal.activeMs)} / idle ${fmtDur(st.goal.idleMs)})`, exportData())
     }
 
     persist()
@@ -248,17 +252,17 @@ export function initTelemetry(): void {
     const actRate = ratePerMin(st.activeGold, st.activeMs)
     const idleRate = ratePerMin(st.idleGold, st.idleMs)
     const botRate = Math.round(BOT_RATE[id](P.levels) * 60_000)
-    const pct = Math.min(100, (P.total / META[id]) * 100)
+    const pct = Math.min(100, (P.gold / META[id]) * 100) // ahorro GASTABLE hacia la ⭐
 
     const goalLine = st.goal
       ? `<div style="color:#4ade80">🏁 meta en <b>${fmtDur(st.goal.totalMs)}</b> (act ${fmtDur(st.goal.activeMs)} · idle ${fmtDur(st.goal.idleMs)})${st.goal.measured ? '' : ' <i style="color:#f87171">— ya batida al iniciar, no representativo</i>'}</div>`
         + (st.goal.measured ? `<div style="color:#64748b">niveles@meta: ${lvlLine(st.goal.levels)}</div>` : '')
-      : etaLine(id, P.total)
+      : etaLine(id, P.gold)
 
     const head = `<div style="color:#fbbf24;margin-top:${full ? 0 : 6}px">${LABEL[id]}${full ? '' : ' <span style="color:#64748b">(inactiva)</span>'}</div>`
     const base =
       `<div>run <b>${fmtDur(runMs)}</b> · act ${fmtDur(st.activeMs)} · idle ${fmtDur(st.idleMs)}</div>` +
-      `<div>meta ${formatNum(P.total)} / ${formatNum(META[id])} (${pct.toFixed(pct < 10 ? 1 : 0)}%)</div>` +
+      `<div>⭐ ${formatNum(P.gold)} / ${formatNum(META[id])} (${pct.toFixed(pct < 10 ? 1 : 0)}%)</div>` +
       `<div>oro/min · act <b style="color:#4ade80">${formatNum(actRate)}</b> · idle <b style="color:#60a5fa">${formatNum(idleRate)}</b> · bot teórico ${formatNum(botRate)}</div>`
     if (!full) return head + base + goalLine
     return head + base +
@@ -266,15 +270,15 @@ export function initTelemetry(): void {
       goalLine
   }
 
-  function etaLine(id: PhaseId, total: number): string {
+  function etaLine(id: PhaseId, gold: number): string {
     const ring = rings[id]
     if (ring.length < 2) return '<div style="color:#64748b">ETA: midiendo…</div>'
     const span = ring[ring.length - 1].t - ring[0].t
     const gained = ring[ring.length - 1].w - ring[0].w
     if (span < 5000 || gained <= 0) return '<div style="color:#64748b">ETA: — (sin ritmo en 60s)</div>'
     const perMin = (gained / span) * 60_000
-    const etaMs = ((META[id] - total) / perMin) * 60_000
-    return `<div>ETA meta ~<b>${fmtDur(etaMs)}</b> (ritmo 60s: ${formatNum(perMin)}/min)</div>`
+    const etaMs = ((META[id] - gold) / perMin) * 60_000 // optimista: asume ahorro sin compras
+    return `<div>ETA ⭐ ~<b>${fmtDur(etaMs)}</b> (ritmo 60s: ${formatNum(perMin)}/min)</div>`
   }
 
   window.setInterval(tick, TICK_MS)
@@ -292,7 +296,8 @@ const fmtDur = (ms: number): string => {
 }
 
 const lvlLine = (levels: Record<string, number>): string => {
-  const parts = Object.entries(levels).filter(([, v]) => v > 0).map(([k, v]) => `${k} ${v}`)
+  // las keys '_*' son marcadores internos (p.ej. migración de la galaxia), no mejoras
+  const parts = Object.entries(levels).filter(([k, v]) => v > 0 && !k.startsWith('_')).map(([k, v]) => `${k} ${v}`)
   return parts.length > 0 ? parts.join(' · ') : '—'
 }
 
