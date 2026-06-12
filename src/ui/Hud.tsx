@@ -14,6 +14,8 @@ export function Hud(props: {
   /** [GLX.1] abre la tienda-galaxia; el color identifica la fase */
   onShop?: () => void
   shopColor?: string
+  /** [GLX.2] hay estrella nueva pagable → el botón pulsa suave */
+  canBuyNew?: boolean
 }) {
   const progress = Math.min(100, (props.totalUi / props.metaGold) * 100)
   return (
@@ -26,7 +28,7 @@ export function Hud(props: {
           <>
             <style>{shopBtnCss}</style>
             <button
-              className="hud-shop"
+              className={props.canBuyNew ? 'hud-shop hud-shop-new' : 'hud-shop'}
               onClick={props.onShop}
               style={{ ...styles.shopBtn, borderColor: props.shopColor ?? '#94a3b8', color: props.shopColor ?? '#94a3b8' }}
               title="abrir la tienda de mejoras"
@@ -76,4 +78,10 @@ const shopBtnCss = `
   .hud-shop:hover { background: #1e293b; box-shadow: 0 0 12px currentColor; transform: translateY(-1px); }
 }
 .hud-shop:active { transform: scale(.96); }
+/* [GLX.2] estrella nueva pagable → pulso suave (animación, no hover: fuera del @media) */
+.hud-shop-new { animation: hud-shop-pulse 1.6s ease-in-out infinite; }
+@keyframes hud-shop-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 14px currentColor; }
+}
 `

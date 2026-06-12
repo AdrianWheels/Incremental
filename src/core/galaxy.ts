@@ -65,7 +65,8 @@ export function starStates(def: GalaxyDef, levels: Record<string, number>): Reco
 }
 
 const RANK: Record<StarState, number> = { far: 0, named: 1, unlocked: 2, owned: 3 }
-const rank = (s: StarState) => RANK[s]
+/** Orden de visibilidad; la UI lo usa para detectar vecinas reveladas por una compra [GLX.2]. */
+export const rank = (s: StarState) => RANK[s]
 
 export const starCost = (star: StarDef, lv: number) => costOf(star, lv)
 

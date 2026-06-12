@@ -2,12 +2,14 @@
  * (el rAF de la fase no se toca; este componente es UI fría — re-render solo
  * vía el cold-version del padre y el throttle de oro de la fase).
  * SVG + CSS, sin rAF propio. Compra en dos pasos: clic en estrella → tarjeta → COMPRAR.
- * El pulido del momento de compra (partículas/ignición/aristas animadas) es [GLX.2]. */
+ * [GLX.2] Momento de compra: partículas oro→estrella, ignición (flash+onda),
+ * aristas a vecinas nuevas dibujadas + reveal con stagger. Todo imperativo con
+ * element.animate() — nodos desechables, cero estado por frame. */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { formatNum } from '../core/utils'
 import { hot, type PhaseId } from '../core/store'
-import { buyStar, starStates, starLevel, starCost, type GalaxyDef, type StarDef, type StarState } from '../core/galaxy'
+import { buyStar, starStates, starLevel, starCost, rank, type GalaxyDef, type StarDef, type StarState } from '../core/galaxy'
 import { sfx } from '../core/audio'
 
 export function GalaxyShop(props: {
@@ -19,6 +21,8 @@ export function GalaxyShop(props: {
   onBought?: (star: StarDef) => void
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const overlayRef = useRef<HTMLDivElement>(null) // cuelga partículas/flash (es fixed inset:0 → coords de viewport)
+  const svgRef = useRef<SVGSVGElement>(null)      // cuelga las ondas expansivas (coords del viewBox)
 
   // ESC cierra (solo mientras está abierta)
   useEffect(() => {
@@ -36,22 +40,21 @@ export function GalaxyShop(props: {
   const selState: StarState | null = selected ? states[selected.id] : null
 
   const buy = (star: StarDef) => {
+    const before = states // estados pre-compra (los de este render)
     if (!buyStar(props.phase, star)) return
     sfx.buy()
-    // mini-flash de la estrella (la ignición de verdad es GLX.2)
-    document.getElementById(starDomId(props.phase, star.id))?.animate(
-      [
-        { transform: 'scale(1)', opacity: 1 },
-        { transform: 'scale(1.6)', opacity: 0.65 },
-        { transform: 'scale(1)', opacity: 1 },
-      ],
-      { duration: 320, easing: 'ease-out' },
+    // vecinas nuevas = estrellas cuyo estado subió de rango con esta compra
+    // (levels es el objeto vivo de hot, ya mutado por buyStar)
+    const after = starStates(props.def, levels)
+    const revealed = props.def.stars.filter(
+      (s) => s.id !== star.id && rank(after[s.id]) > rank(before[s.id]),
     )
+    igniteSequence(props.phase, star, revealed, overlayRef.current, svgRef.current)
     props.onBought?.(star)
   }
 
   return (
-    <div style={styles.overlay}>
+    <div ref={overlayRef} style={styles.overlay}>
       <style>{css}</style>
 
       {/* polvo estelar de fondo (CSS puro, deriva lenta) */}
@@ -59,11 +62,11 @@ export function GalaxyShop(props: {
 
       <header style={styles.head}>
         <span style={styles.title}>{props.def.title}</span>
-        <span style={styles.gold}>● {formatNum(props.gold)}</span>
+        <span id={`glx-gold-${props.phase}`} style={styles.gold}>● {formatNum(props.gold)}</span>
         <button className="glx-close" style={styles.close} onClick={props.onClose} title="cerrar (ESC)">✕</button>
       </header>
 
-      <svg viewBox="0 0 100 100" style={styles.svg}>
+      <svg ref={svgRef} viewBox="0 0 100 100" style={styles.svg}>
         {/* aristas: visibles cuando ambos extremos se conocen (la ⭐ se conoce siempre) */}
         {props.def.stars.flatMap((s) =>
           s.edges.map((to) => {
@@ -75,6 +78,7 @@ export function GalaxyShop(props: {
             return (
               <line
                 key={`${s.id}-${to}`}
+                id={`glx-edge-${props.phase}-${s.id}-${to}`}
                 x1={s.x} y1={s.y} x2={t.x} y2={t.y}
                 stroke={lit ? '#fbbf24' : '#334155'}
                 strokeWidth={lit ? 0.35 : 0.22}
@@ -121,6 +125,147 @@ export function GalaxyShop(props: {
 }
 
 const starDomId = (phase: PhaseId, id: string) => `glx-${phase}-${id}`
+
+/* ============================================================================
+ * [GLX.2] El momento de compra — secuencia imperativa, todo por evento:
+ * partículas oro→estrella (~520ms) → ignición (flash + onda + SFX) →
+ * aristas a vecinas nuevas dibujadas + reveal con stagger.
+ * ========================================================================== */
+
+// Diales de la ceremonia
+const PARTICLES = 10           // partículas oro→estrella (la ⭐ de Sala usa SALA_PARTICLES)
+const SALA_PARTICLES = 26
+const PARTICLE_MS = 520        // vuelo base de cada partícula (+jitter)
+const PARTICLE_BEND = 90       // desvío máx. de la curva en el punto medio (px)
+const IGNITE_AT_MS = 460       // cuándo prende la estrella (las partículas van llegando)
+const REVEAL_DELAY_MS = 140    // tras la ignición, cuándo empieza el reveal de vecinas
+const REVEAL_STAGGER_MS = 80   // entre vecinas reveladas
+
+function igniteSequence(
+  phase: PhaseId,
+  star: StarDef,
+  revealed: StarDef[],
+  overlay: HTMLDivElement | null,
+  svg: SVGSVGElement | null,
+) {
+  const sala = !!star.sala
+  const starEl = document.getElementById(starDomId(phase, star.id))
+  const goldEl = document.getElementById(`glx-gold-${phase}`)
+
+  // 1) partículas doradas del contador del header a la estrella
+  if (overlay && goldEl && starEl) {
+    const from = goldEl.getBoundingClientRect()
+    const to = starEl.getBoundingClientRect()
+    const fx = from.left + from.width / 2
+    const fy = from.top + from.height / 2
+    const dx = to.left + to.width / 2 - fx
+    const dy = to.top + to.height / 2 - fy
+    const len = Math.hypot(dx, dy) || 1
+    const n = sala ? SALA_PARTICLES : PARTICLES
+    for (let i = 0; i < n; i++) {
+      const p = document.createElement('div')
+      p.style.cssText =
+        `position:fixed;left:${fx}px;top:${fy}px;width:6px;height:6px;margin:-3px 0 0 -3px;` +
+        'border-radius:50%;background:#fde68a;box-shadow:0 0 8px 2px #fbbf24cc;pointer-events:none;z-index:3;'
+      overlay.appendChild(p)
+      const bend = (Math.random() - 0.5) * 2 * PARTICLE_BEND // curva: desvío perpendicular en el punto medio
+      const mx = dx / 2 + (-dy / len) * bend
+      const my = dy / 2 + (dx / len) * bend
+      const anim = p.animate(
+        [
+          { transform: 'translate(0,0) scale(1)', opacity: 0.95, offset: 0 },
+          { transform: `translate(${mx}px,${my}px) scale(1.2)`, opacity: 1, offset: 0.55 },
+          { transform: `translate(${dx}px,${dy}px) scale(0.4)`, opacity: 0.9 },
+        ],
+        { duration: PARTICLE_MS + Math.random() * 140, delay: Math.random() * 120, easing: 'cubic-bezier(.5,0,.6,1)', fill: 'backwards' },
+      )
+      anim.onfinish = () => p.remove()
+    }
+  }
+
+  // 2) ignición cuando llegan + 3) aristas/reveal (para entonces React ya re-renderizó la compra)
+  window.setTimeout(() => {
+    if (sala) sfx.igniteSala()
+    else sfx.ignite()
+    starEl?.animate(
+      [
+        { transform: 'scale(1)', filter: 'brightness(1)' },
+        { transform: `scale(${sala ? 2.6 : 2.1})`, filter: 'brightness(2.4)' },
+        { transform: 'scale(1)', filter: 'brightness(1)' },
+      ],
+      { duration: sala ? 700 : 450, easing: 'ease-out' },
+    )
+    spawnWave(svg, star, 0)
+    if (sala) {
+      spawnWave(svg, star, 140) // doble onda
+      screenFlash(overlay)
+    }
+    revealNeighbors(phase, star, revealed)
+  }, IGNITE_AT_MS)
+}
+
+/** Onda expansiva: círculo SVG desechable que escala desde la estrella y se desvanece. */
+function spawnWave(svg: SVGSVGElement | null, star: StarDef, delay: number) {
+  if (!svg) return
+  const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
+  c.setAttribute('cx', String(star.x))
+  c.setAttribute('cy', String(star.y))
+  c.setAttribute('r', String(star.sala ? 3.2 : 2.1))
+  c.setAttribute('fill', 'none')
+  c.setAttribute('stroke', star.color)
+  c.setAttribute('stroke-width', '0.4')
+  c.style.pointerEvents = 'none'
+  c.style.opacity = '0' // invisible durante el delay (los keyframes mandan al animar)
+  c.style.transformOrigin = `${star.x}px ${star.y}px`
+  svg.appendChild(c)
+  const a = c.animate(
+    [
+      { transform: 'scale(1)', opacity: 0.9 },
+      { transform: `scale(${star.sala ? 9 : 6})`, opacity: 0 },
+    ],
+    { duration: 520, delay, easing: 'ease-out' },
+  )
+  a.onfinish = () => c.remove()
+}
+
+/** Flash de pantalla breve (solo ⭐ de Sala). */
+function screenFlash(overlay: HTMLDivElement | null) {
+  if (!overlay) return
+  const f = document.createElement('div')
+  f.style.cssText = 'position:fixed;inset:0;background:#fff7e0;pointer-events:none;z-index:4;opacity:0;'
+  overlay.appendChild(f)
+  const a = f.animate([{ opacity: 0 }, { opacity: 0.32, offset: 0.25 }, { opacity: 0 }], { duration: 420, easing: 'ease-out' })
+  a.onfinish = () => f.remove()
+}
+
+/** Aristas comprada→vecina dibujándose (dashoffset → 0) + vecinas con fade-in, en stagger. */
+function revealNeighbors(phase: PhaseId, star: StarDef, revealed: StarDef[]) {
+  revealed.forEach((nb, i) => {
+    const delay = REVEAL_DELAY_MS + i * REVEAL_STAGGER_MS
+    // las aristas se declaran en una sola dirección → probar ambas
+    const line =
+      document.getElementById(`glx-edge-${phase}-${star.id}-${nb.id}`) ??
+      document.getElementById(`glx-edge-${phase}-${nb.id}-${star.id}`)
+    if (line) {
+      const L = Math.hypot(nb.x - star.x, nb.y - star.y)
+      line.animate(
+        [
+          { strokeDasharray: `${L}`, strokeDashoffset: `${L}`, opacity: 0.9 },
+          { strokeDasharray: `${L}`, strokeDashoffset: '0', opacity: 0.9 },
+        ],
+        { duration: 380, delay, easing: 'ease-out' },
+      )
+    }
+    document.getElementById(starDomId(phase, nb.id))?.animate(
+      [
+        { opacity: 0, transform: 'scale(0.4)' },
+        { opacity: 1, transform: 'scale(1.15)', offset: 0.7 },
+        { opacity: 1, transform: 'scale(1)' },
+      ],
+      { duration: 420, delay, easing: 'ease-out', fill: 'backwards' },
+    )
+  })
+}
 
 /* ---- una estrella ---- */
 function Star(props: {

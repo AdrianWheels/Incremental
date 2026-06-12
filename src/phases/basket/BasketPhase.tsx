@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { rand, lerp, formatNum } from '../../core/utils'
 import { createNuggetSystem, drawMagnetRing, type NuggetSystem } from '../../core/nuggets'
 import { hot, useColdVersion } from '../../core/store'
-import { SALA_COST, type StarDef } from '../../core/galaxy'
+import { SALA_COST, starStates, starCost, type StarDef } from '../../core/galaxy'
 import { sfx } from '../../core/audio'
 import { probeNuggets } from '../../debug/probe'
 import { Hud } from '../../ui/Hud'
@@ -144,6 +144,7 @@ export function BasketPhase() {
   const [shopOpen, setShopOpen] = useState(false)
   const shopOpenRef = useRef(false)
   shopOpenRef.current = shopOpen
+  const [canBuyNew, setCanBuyNew] = useState(false) // estrella nueva pagable → el botón TIENDA pulsa [GLX.2]
   const floaterId = useRef(0)
 
   const pushFloater = (x: number, y: number, label: string, color: string) => {
@@ -278,6 +279,9 @@ export function BasketPhase() {
       setCanastas(P.goles)
       setFallos(P.fallos)
       setComboUi(comboRef.current)
+      // ¿hay estrella nueva pagable? (barato: grafo de 9 nodos; React ignora el set si no cambia) [GLX.2]
+      const st = starStates(GALAXY_BASKET, P.levels)
+      setCanBuyNew(GALAXY_BASKET.stars.some((s) => st[s.id] === 'unlocked' && P.gold >= starCost(s, 0)))
     }, 120)
     return () => window.clearInterval(id)
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
@@ -463,9 +467,13 @@ export function BasketPhase() {
   const onStarBought = (star: StarDef) => {
     setGoldUi(P.gold)
     if (star.id === SALA3_ID) {
-      sfx.victory()
-      setShopOpen(false)
-      setVictory(true)
+      // la ceremonia ×10 de la tienda se ve ENTERA antes del banner [GLX.2]
+      // (partículas ~460ms + flash/doble onda ~660ms más; cortar antes trunca el screen-flash)
+      window.setTimeout(() => {
+        sfx.victory()
+        setShopOpen(false)
+        setVictory(true)
+      }, 1200)
     }
   }
   const openShop = () => {
@@ -491,6 +499,7 @@ export function BasketPhase() {
         metaGold={SALA_COST}
         onShop={openShop}
         shopColor="#ff8c42"
+        canBuyNew={canBuyNew && !shopOpen}
         tally={[
           { label: `${canastas} canastas`, color: '#4ade80' },
           { label: `${fallos} fallos`, color: '#ef4444' },

@@ -112,6 +112,21 @@ export const sfx = {
     blip(520, 0.07, { type: 'square', gain: 0.07 })
     blip(780, 0.10, { type: 'square', gain: 0.07, delay: 0.07 })
   },
+  /** [GLX.2] ignición de una estrella de la galaxia: swell de ruido que sube + campana al prender. */
+  ignite() {
+    if (!gate('ignite', 150)) return
+    noiseBurst(500, 0.5, { gain: 0.07, q: 1.2, slideTo: 2800 })
+    blip(1320, 0.30, { type: 'sine', gain: 0.12, delay: 0.10 })
+    blip(1980, 0.22, { type: 'sine', gain: 0.07, delay: 0.16 })
+  },
+  /** [GLX.2] versión ×10 para la ⭐ de Sala: sub grave + arpegio largo + doble swell. */
+  igniteSala() {
+    if (!gate('ignite', 1000)) return
+    blip(64, 1.1, { type: 'sine', gain: 0.30, slideTo: 40 })
+    ;[392, 523, 659, 784, 1046, 1318, 1568].forEach((n, i) => blip(n, 0.34, { type: 'triangle', gain: 0.12, delay: 0.12 + i * 0.09 }))
+    noiseBurst(400, 0.9, { gain: 0.08, q: 0.9, slideTo: 3200 })
+    noiseBurst(2200, 0.7, { gain: 0.05, q: 0.6, slideTo: 5200, delay: 0.45 })
+  },
   victory() {
     if (!gate('victory', 1000)) return
     const notes = [523, 659, 784, 1046, 1318]
