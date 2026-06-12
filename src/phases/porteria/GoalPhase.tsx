@@ -635,7 +635,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
 
       <p style={styles.hint}>
         Clic / <kbd style={styles.kbd}>ESPACIO</kbd> para chutar · barre los <b style={{ color: '#fbbf24' }}>nuggets</b> con el ratón ·
-        compra mejoras en la <b style={{ color: '#4ade80' }}>🌌 galaxia</b> · la ⭐ de 1M gana la zona
+        compra mejoras en la <b style={{ color: '#4ade80' }}>🛒 tienda</b> · la ⭐ de 1M gana la zona
       </p>
     </div>
   )

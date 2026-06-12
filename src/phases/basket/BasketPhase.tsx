@@ -606,7 +606,7 @@ export function BasketPhase() {
       <p style={styles.hint}>
         <b style={{ color: '#e2e8f0' }}>Mantén pulsado</b> (clic o <kbd style={styles.kbd}>ESPACIO</kbd>) y suelta en la
         franja <b style={{ color: '#ffd23f' }}>dorada</b> = SWISH · <kbd style={styles.kbd}>1</kbd>/<kbd style={styles.kbd}>2</kbd>/<kbd style={styles.kbd}>3</kbd> cambia
-        de posición · compra mejoras en la <b style={{ color: '#ff8c42' }}>🌌 galaxia</b>
+        de posición · compra mejoras en la <b style={{ color: '#ff8c42' }}>🛒 tienda</b>
       </p>
     </div>
   )
@@ -684,6 +684,7 @@ const css = `
   font-size:10px; font-weight:800; letter-spacing:1px; font-family:inherit; cursor:pointer; z-index:7;
   transition: all .15s;
 }
+@media (hover: hover) { .pos-mark:hover { filter: brightness(1.4); } }
 .bball {
   position:absolute; top:0; left:0; will-change:transform,opacity; border-radius:50%; z-index:8;
   background: radial-gradient(circle at 32% 30%, #ff9d5c 0%, #e8702a 45%, #b34a14 80%, #8a3710 100%);

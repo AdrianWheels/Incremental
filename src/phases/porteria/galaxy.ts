@@ -127,7 +127,7 @@ const STARS: StarDef[] = [
 
 export const GALAXY_PORTERIA: GalaxyDef = {
   phase: 'porteria',
-  title: '⚽ GALAXIA · PORTERÍA',
+  title: '⚽ TIENDA · PORTERÍA',
   centerId: 'potencia',
   stars: STARS,
 }

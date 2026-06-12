@@ -60,7 +60,7 @@ export function GalaxyShop(props: {
       <header style={styles.head}>
         <span style={styles.title}>{props.def.title}</span>
         <span style={styles.gold}>● {formatNum(props.gold)}</span>
-        <button style={styles.close} onClick={props.onClose} title="cerrar (ESC)">✕</button>
+        <button className="glx-close" style={styles.close} onClick={props.onClose} title="cerrar (ESC)">✕</button>
       </header>
 
       <svg viewBox="0 0 100 100" style={styles.svg}>
@@ -145,7 +145,7 @@ function Star(props: {
       id={props.domId}
       onClick={props.onPick}
       style={{ cursor: 'pointer', transformOrigin: `${star.x}px ${star.y}px` }}
-      className={unlocked ? 'glx-pulse' : undefined}
+      className={unlocked ? 'glx-star glx-pulse' : 'glx-star'}
     >
       {/* halo de selección */}
       {props.selected && <circle cx={star.x} cy={star.y} r={r + 1.4} fill="none" stroke="#e2e8f0" strokeWidth={0.22} strokeDasharray="0.8 0.8" />}
@@ -197,6 +197,7 @@ function BuyCard(props: { star: StarDef; lv: number; gold: number; locked: boole
         <div style={{ ...styles.cardCost, color: '#64748b' }}>MÁX</div>
       ) : (
         <button
+          className="glx-buy"
           onClick={props.onBuy}
           disabled={!afford}
           style={{
@@ -243,7 +244,7 @@ const styles: Record<string, React.CSSProperties> = {
   cardCost: { fontSize: 13, fontWeight: 800 },
   buyBtn: {
     font: 'inherit', fontSize: 13, fontWeight: 800, padding: '8px 10px', borderRadius: 8,
-    border: '1.5px solid', background: '#111c18', letterSpacing: 0.5,
+    border: '1.5px solid', background: '#111c18', letterSpacing: 0.5, transition: 'all .15s',
   },
   hint: { fontSize: 12, color: '#475569', margin: '0 0 14px' },
 }
@@ -265,4 +266,12 @@ const css = `
 @keyframes glx-drift { from { transform: translate(0,0); } to { transform: translate(-9%, -5%); } }
 .glx-pulse .glx-core { animation: glx-pulse 1.8s ease-in-out infinite; }
 @keyframes glx-pulse { 50% { stroke-width: 0.7; } }
+.glx-star .glx-core { transition: filter .15s, stroke-width .15s; }
+/* hover solo con puntero real (en táctil se quedaría pegado) */
+@media (hover: hover) {
+  .glx-star:hover .glx-core { stroke-width: 0.7; filter: brightness(1.3) drop-shadow(0 0 1px currentColor); }
+  .glx-close:hover { color: #e2e8f0; border-color: #94a3b8; }
+  .glx-buy:not(:disabled):hover { background: #1e293b; box-shadow: 0 0 14px #ffffff22; transform: translateY(-1px); }
+}
+.glx-buy:not(:disabled):active { transform: scale(.97); }
 `

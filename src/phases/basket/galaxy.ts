@@ -125,7 +125,7 @@ const STARS: StarDef[] = [
 
 export const GALAXY_BASKET: GalaxyDef = {
   phase: 'basket',
-  title: '🏀 GALAXIA · CANCHA',
+  title: '🏀 TIENDA · CANCHA',
   centerId: 'tiro',
   stars: STARS,
 }

@@ -39,10 +39,12 @@ export function App() {
 
   return (
     <>
+      <style>{appCss}</style>
       <nav style={styles.tabs}>
         <PhaseTab id="porteria" label="⚽ PORTERÍA" active={active} unlocked onPick={switchPhase} />
         <PhaseTab id="basket" label={basketUnlocked ? '🏀 CANCHA' : '🔒 CANCHA'} active={active} unlocked={basketUnlocked} onPick={switchPhase} />
         <button
+          className="app-pill"
           onClick={() => { hot.muted = !hot.muted; commit() }}
           title={hot.muted ? 'Activar sonido' : 'Silenciar'}
           style={{ ...styles.tab, borderColor: '#334155', color: hot.muted ? '#475569' : '#94a3b8', background: '#0c1512cc', cursor: 'pointer' }}
@@ -61,7 +63,7 @@ export function App() {
               </span>
             )}
           </span>
-          <button style={styles.offlineOk} onClick={() => setOfflineSeen(true)}>OK</button>
+          <button className="app-pill" style={styles.offlineOk} onClick={() => setOfflineSeen(true)}>OK</button>
         </div>
       )}
       {active === 'porteria'
@@ -75,6 +77,7 @@ function PhaseTab(props: { id: PhaseId; label: string; active: PhaseId; unlocked
   const isActive = props.active === props.id
   return (
     <button
+      className="app-pill"
       onClick={() => props.unlocked && props.onPick(props.id)}
       disabled={!props.unlocked}
       title={props.unlocked ? undefined : 'Bate al portero para desbloquear'}
@@ -92,6 +95,15 @@ function PhaseTab(props: { id: PhaseId; label: string; active: PhaseId; unlocked
 }
 
 const PHASE_EMOJI: Record<PhaseId, string> = { porteria: '⚽', basket: '🏀' }
+
+// hover solo con puntero real (en táctil se quedaría pegado)
+const appCss = `
+@media (hover: hover) {
+  .app-pill:hover:not(:disabled) { filter: brightness(1.35); transform: translateY(-1px); }
+}
+.app-pill { transition: all .15s; }
+.app-pill:active:not(:disabled) { transform: scale(.96); }
+`
 
 const styles: Record<string, React.CSSProperties> = {
   tabs: {

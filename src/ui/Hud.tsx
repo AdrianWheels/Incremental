@@ -23,13 +23,17 @@ export function Hud(props: {
         <span ref={props.goldElRef} style={styles.goldNum}>0</span>
         <span style={styles.goldLbl}>ORO</span>
         {props.onShop && (
-          <button
-            onClick={props.onShop}
-            style={{ ...styles.shopBtn, borderColor: props.shopColor ?? '#94a3b8', color: props.shopColor ?? '#94a3b8' }}
-            title="abrir la galaxia de mejoras"
-          >
-            🌌 GALAXIA
-          </button>
+          <>
+            <style>{shopBtnCss}</style>
+            <button
+              className="hud-shop"
+              onClick={props.onShop}
+              style={{ ...styles.shopBtn, borderColor: props.shopColor ?? '#94a3b8', color: props.shopColor ?? '#94a3b8' }}
+              title="abrir la tienda de mejoras"
+            >
+              🛒 TIENDA
+            </button>
+          </>
         )}
       </div>
       <div style={styles.metaWrap}>
@@ -62,5 +66,14 @@ const styles: Record<string, React.CSSProperties> = {
   shopBtn: {
     font: 'inherit', fontSize: 12, fontWeight: 800, letterSpacing: 1, marginLeft: 14, alignSelf: 'center',
     padding: '6px 14px', borderRadius: 999, border: '1.5px solid', background: '#0c1512cc', cursor: 'pointer',
+    transition: 'all .15s',
   },
 }
+
+// hover solo en dispositivos con puntero (en táctil no hay hover que se quede pegado)
+const shopBtnCss = `
+@media (hover: hover) {
+  .hud-shop:hover { background: #1e293b; box-shadow: 0 0 12px currentColor; transform: translateY(-1px); }
+}
+.hud-shop:active { transform: scale(.96); }
+`
