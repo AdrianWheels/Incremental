@@ -4,6 +4,7 @@ import { costOf, type UpgradeDef } from '../../core/economy'
 import { createNuggetSystem, drawMagnetRing, type NuggetSystem } from '../../core/nuggets'
 import { hot, useColdVersion, buyUpgrade } from '../../core/store'
 import { sfx } from '../../core/audio'
+import { probeNuggets } from '../../debug/probe'
 import { Hud } from '../../ui/Hud'
 import { UpgradePanel, type UpgRow } from '../../ui/UpgradePanel'
 
@@ -169,6 +170,7 @@ export function GoalPhase(props: { onVictory?: () => void; victorySeen?: boolean
   const goldDispRef = useRef(P.gold)    // valor mostrado (lerp → "tick")
   const nugSysRef = useRef<NuggetSystem | null>(null)
   if (!nugSysRef.current) nugSysRef.current = createNuggetSystem()
+  probeNuggets.porteria = nugSysRef.current // sonda [BAL.1]: el oro del suelo cuenta como generado
   const mouseRef = useRef({ x: 0, y: 0, inside: false })
   // bot delantero: balón y reloj propios — nunca toca el cooldown del jugador
   const botBallRef = useRef<HTMLDivElement>(null)

@@ -4,6 +4,7 @@ import { costOf, type UpgradeDef } from '../../core/economy'
 import { createNuggetSystem, drawMagnetRing, type NuggetSystem } from '../../core/nuggets'
 import { hot, useColdVersion, buyUpgrade } from '../../core/store'
 import { sfx } from '../../core/audio'
+import { probeNuggets } from '../../debug/probe'
 import { Hud } from '../../ui/Hud'
 import { UpgradePanel, type UpgRow } from '../../ui/UpgradePanel'
 
@@ -158,6 +159,7 @@ export function BasketPhase() {
     // los nuggets CAEN del aro (no explotan hacia arriba como en la portería)
     nugSysRef.current = createNuggetSystem({ spawnVx: [-1.6, 1.6], spawnVy: [0.5, 2.5] })
   }
+  probeNuggets.basket = nugSysRef.current // sonda [BAL.1]: el oro del suelo cuenta como generado
   const mouseRef = useRef({ x: 0, y: 0, inside: false })
   const cssWRef = useRef(760)
   const cssHRef = useRef(475)
